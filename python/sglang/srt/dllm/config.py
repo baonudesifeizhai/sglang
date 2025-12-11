@@ -1,7 +1,22 @@
-from typing import Any
+from typing import Any, Tuple
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.server_args import ServerArgs
+
+
+def get_architecture_config(architecture: str, hf_config: Any) -> Tuple[int, int]:
+    if architecture == "LLaDA2MoeModelLM":
+        block_size = 32
+        mask_id = 156895
+    elif architecture == "Fast_dLLM_QwenForCausalLM":
+        block_size = getattr(hf_config, "bd_size", 32)
+        mask_id = 151665
+    else:
+        raise RuntimeError(
+            f"Unknown diffusion LLM: {architecture}. "
+            f"Supported architectures: LLaDA2MoeModelLM, Fast_dLLM_QwenForCausalLM"
+        )
+    return block_size, mask_id
 
 
 class DllmConfig:
@@ -30,13 +45,10 @@ class DllmConfig:
             model_revision=server_args.revision,
         )
 
-        if model_config.hf_config.architectures[0] == "LLaDA2MoeModelLM":
-            block_size = 32
-            mask_id = 156895
-        else:
-            raise RuntimeError(
-                f"Unknown diffusion LLM: {model_config.hf_config.architectures[0]}"
-            )
+        architecture = model_config.hf_config.architectures[0]
+        block_size, mask_id = get_architecture_config(
+            architecture, model_config.hf_config
+        )
 
         algorithm_config = {}
         if server_args.dllm_algorithm_config is not None:

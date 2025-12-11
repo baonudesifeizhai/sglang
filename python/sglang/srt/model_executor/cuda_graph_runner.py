@@ -748,7 +748,12 @@ class CudaGraphRunner:
         self.recapture_if_needed(forward_batch)
 
         raw_bs = forward_batch.batch_size
-        raw_num_token = raw_bs * self.num_tokens_per_bs
+        # For DLLM_EXTEND mode, use actual input_ids size instead of calculated value
+        # because dllm algorithm may modify input_ids dynamically
+        if forward_batch.forward_mode.is_dllm_extend():
+            raw_num_token = forward_batch.input_ids.shape[0]
+        else:
+            raw_num_token = raw_bs * self.num_tokens_per_bs
 
         # Pad
         if self.require_mlp_tp_gather:

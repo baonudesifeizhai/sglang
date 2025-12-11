@@ -700,4 +700,16 @@ class Qwen2ForCausalLM(nn.Module):
             self.model.layers_to_capture = [val + 1 for val in layer_ids]
 
 
-EntryClass = Qwen2ForCausalLM
+class Fast_dLLM_QwenForCausalLM(Qwen2ForCausalLM):
+    def __init__(
+        self,
+        config: Qwen2Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, quant_config, prefix)
+        if self.pp_group.is_last_rank:
+            self.logits_processor = LogitsProcessor(config, return_full_logits=True)
+
+
+EntryClass = [Qwen2ForCausalLM, Fast_dLLM_QwenForCausalLM]
