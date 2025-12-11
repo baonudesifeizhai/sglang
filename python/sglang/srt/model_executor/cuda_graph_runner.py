@@ -825,8 +825,10 @@ class CudaGraphRunner:
             self.replay_prepare(forward_batch, pp_proxy_tensors)
         else:
             # In speculative decoding, these two fields are still needed.
-            self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
-            self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
+            if self.raw_num_token > 0 and forward_batch.input_ids.shape[0] > 0:
+                copy_len = min(self.raw_num_token, forward_batch.input_ids.shape[0])
+                self.buffers.input_ids[:copy_len].copy_(forward_batch.input_ids[:copy_len])
+                self.buffers.positions[:copy_len].copy_(forward_batch.positions[:copy_len])
 
         # Replay
         if self.enable_pdmux:

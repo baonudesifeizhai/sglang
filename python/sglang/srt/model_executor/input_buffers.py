@@ -136,10 +136,11 @@ class GraphInputBuffers:
             self.out_cache_loc.zero_()
 
         # Common inputs
-        if raw_num_token > 0:
-            self.input_ids[:raw_num_token].copy_(forward_batch.input_ids)
-            self.out_cache_loc[:raw_num_token].copy_(forward_batch.out_cache_loc)
-            self.positions[:raw_num_token].copy_(forward_batch.positions)
+        if raw_num_token > 0 and forward_batch.input_ids.shape[0] > 0:
+            copy_len = min(raw_num_token, forward_batch.input_ids.shape[0])
+            self.input_ids[:copy_len].copy_(forward_batch.input_ids[:copy_len])
+            self.out_cache_loc[:copy_len].copy_(forward_batch.out_cache_loc[:copy_len])
+            self.positions[:copy_len].copy_(forward_batch.positions[:copy_len])
         self.req_pool_indices[:raw_bs].copy_(forward_batch.req_pool_indices)
         self.seq_lens[:raw_bs].copy_(forward_batch.seq_lens)
 
