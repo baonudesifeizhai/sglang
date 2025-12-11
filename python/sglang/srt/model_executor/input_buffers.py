@@ -136,11 +136,12 @@ class GraphInputBuffers:
             self.out_cache_loc.zero_()
 
         # Common inputs
-        self.input_ids[:raw_num_token].copy_(forward_batch.input_ids)
+        if raw_num_token > 0:
+            self.input_ids[:raw_num_token].copy_(forward_batch.input_ids)
+            self.out_cache_loc[:raw_num_token].copy_(forward_batch.out_cache_loc)
+            self.positions[:raw_num_token].copy_(forward_batch.positions)
         self.req_pool_indices[:raw_bs].copy_(forward_batch.req_pool_indices)
         self.seq_lens[:raw_bs].copy_(forward_batch.seq_lens)
-        self.out_cache_loc[:raw_num_token].copy_(forward_batch.out_cache_loc)
-        self.positions[:raw_num_token].copy_(forward_batch.positions)
 
         seq_lens_cpu: Optional[torch.Tensor] = None
         if forward_batch.seq_lens_cpu is not None:
