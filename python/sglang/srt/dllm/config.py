@@ -37,7 +37,9 @@ class DllmConfig:
             mask_id = 156895
         elif arch in ("FastDLLMForCausalLM", "Fast_dLLM_QwenForCausalLM"):
             block_size = getattr(hf_config, "bd_size", 32)
-            mask_id = getattr(hf_config, "mask_token_id", 151665)
+            # mask_token_id is in tokenizer config, not model config
+            # For Fast_dLLM_v2_7B, the mask token "|<MASK>|" has id 151665
+            mask_id = 151665
         else:
             raise RuntimeError(f"Unknown diffusion LLM: {arch}")
 

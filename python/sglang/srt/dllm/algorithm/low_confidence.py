@@ -27,8 +27,12 @@ class LowConfidence(DllmAlgorithm):
     ) -> Tuple[
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
+        # input_ids contains only the current block (mask tokens)
+        # full_logits contains logits for the entire sequence (prefix + current block)
+        # We need to extract only the logits for the current block
+
+        num_input_tokens = len(forward_batch.input_ids)
         mask_index = forward_batch.input_ids == self.mask_id
-        start = len(forward_batch.input_ids) - torch.sum(mask_index).item()
 
         for _ in range(self.block_size):
             mask_index = forward_batch.input_ids == self.mask_id
@@ -39,10 +43,14 @@ class LowConfidence(DllmAlgorithm):
                 forward_batch, pp_proxy_tensors=None
             )
 
-            x = torch.argmax(logits_output.full_logits, dim=-1)
+            # full_logits shape: [total_seq_len, vocab_size]
+            # We only need the last num_input_tokens (the current block)
+            block_logits = logits_output.full_logits[-num_input_tokens:]
+
+            x = torch.argmax(block_logits, dim=-1)
             p = torch.squeeze(
                 torch.gather(
-                    F.softmax(logits_output.full_logits, dim=-1),
+                    F.softmax(block_logits, dim=-1),
                     dim=-1,
                     index=torch.unsqueeze(x, -1),
                 ),
@@ -62,7 +70,8 @@ class LowConfidence(DllmAlgorithm):
             forward_batch, pp_proxy_tensors=None
         )
 
-        next_token_ids = forward_batch.input_ids[start:]
+        # Return all tokens in the current block as the generated tokens
+        next_token_ids = forward_batch.input_ids
         return logits_output, next_token_ids, can_run_cuda_graph
 
 
