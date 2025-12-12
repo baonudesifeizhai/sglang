@@ -385,6 +385,9 @@ class ForwardBatch:
     # Record the split metadata of the sequence number of NSA context parallels.
     nsa_cp_metadata: Optional[NSAContextParallelMetadata] = None
 
+    # For dLLM: store the requests to access fill_ids
+    reqs: Optional[List] = None
+
     @classmethod
     def init_new(
         cls,
@@ -425,6 +428,7 @@ class ForwardBatch:
             token_type_ids=batch.token_type_ids,
             tbo_split_seq_index=batch.tbo_split_seq_index,
             dimensions=batch.dimensions,
+            reqs=batch.reqs,
         )
         device = model_runner.device
 

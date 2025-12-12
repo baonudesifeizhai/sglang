@@ -1,3 +1,11 @@
+"""
+LowConfidence decoding algorithm for diffusion LLM.
+
+This algorithm iteratively fills mask tokens based on confidence scores.
+For dLLM, we need to process the full sequence (prompt + current block)
+in each iteration, not just the mask tokens.
+"""
+
 import logging
 from typing import Optional, Tuple, Union
 
@@ -30,90 +38,160 @@ class LowConfidence(DllmAlgorithm):
     ) -> Tuple[
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
-        # Debug: check what we have
+        """
+        Run LowConfidence decoding for dLLM.
+
+        The key insight is that dLLM needs to see the full sequence (prompt + current block)
+        in each iteration. We achieve this by:
+        1. Getting the full sequence from req.fill_ids
+        2. Creating a new input_ids tensor with the full sequence
+        3. Iteratively filling mask tokens based on confidence
+        4. Only returning the newly generated tokens (the current block)
+        """
+        device = forward_batch.input_ids.device
+
+        # Get the request - we only support batch_size=1 for dLLM
+        assert forward_batch.batch_size == 1, "dLLM only supports batch_size=1"
+        assert forward_batch.reqs is not None, "reqs must be provided for dLLM"
+        req = forward_batch.reqs[0]
+
+        # Get the full sequence (prompt + all previous blocks + current block masks)
+        full_ids = torch.tensor(req.fill_ids, dtype=torch.int64, device=device)
+        seq_len = len(full_ids)
+
+        # Find the start position of current block's mask tokens
+        # This is where the new tokens will be generated
+        block_start = seq_len - self.block_size
+
         logger.info(f"=== LowConfidence.run START ===")
-        logger.info(f"input_ids shape: {forward_batch.input_ids.shape}")
-        logger.info(f"input_ids: {forward_batch.input_ids.tolist()}")
-        logger.info(f"mask_id: {self.mask_id}")
-        logger.info(f"extend_prefix_lens_cpu: {forward_batch.extend_prefix_lens_cpu}")
-        logger.info(f"extend_seq_lens_cpu: {forward_batch.extend_seq_lens_cpu}")
-        logger.info(f"forward_mode: {forward_batch.forward_mode}")
+        logger.info(f"full_ids length: {seq_len}, block_start: {block_start}")
+        logger.info(f"full_ids last 40: {full_ids[-40:].tolist()}")
 
-        # Check positions
-        if forward_batch.positions is not None:
-            logger.info(f"positions: {forward_batch.positions.tolist()}")
+        # Create positions for the full sequence
+        positions = torch.arange(seq_len, dtype=torch.int32, device=device)
 
-        # input_ids contains the entire sequence (prefix + mask tokens)
-        # We need to find where the mask tokens start
-        mask_index = forward_batch.input_ids == self.mask_id
-        num_masks = torch.sum(mask_index).item()
-
-        logger.info(f"num_masks: {num_masks}")
-
-        # Find the start position of mask tokens (first mask position)
-        if num_masks > 0:
-            mask_positions = torch.where(mask_index)[0]
-            start = mask_positions[0].item()
-            logger.info(f"mask_positions: {mask_positions.tolist()}, start: {start}")
-        else:
-            start = len(forward_batch.input_ids)
-            logger.info(f"no masks found, start: {start}")
-
+        # Iteratively fill mask tokens
         for iter_i in range(self.block_size):
-            mask_index = forward_batch.input_ids == self.mask_id
-            remaining_masks = torch.sum(mask_index).item()
+            # Find mask positions in the current block
+            current_block = full_ids[block_start:]
+            mask_index_block = current_block == self.mask_id
+            remaining_masks = torch.sum(mask_index_block).item()
+
             if remaining_masks == 0:
                 logger.info(f"iter {iter_i}: no more masks, breaking")
                 break
 
+            # Create a temporary ForwardBatch with full sequence
+            # We need to bypass KV cache and compute attention over the full sequence
+            temp_batch = self._create_full_seq_batch(
+                forward_batch, full_ids, positions, model_runner
+            )
+
             logits_output, can_run_cuda_graph = model_runner.forward(
-                forward_batch, pp_proxy_tensors=None
+                temp_batch, pp_proxy_tensors=None
             )
 
-            logger.info(
-                f"iter {iter_i}: full_logits shape: {logits_output.full_logits.shape}, remaining_masks: {remaining_masks}"
-            )
+            if iter_i == 0:
+                logger.info(
+                    f"iter {iter_i}: full_logits shape: {logits_output.full_logits.shape}"
+                )
 
-            x = torch.argmax(logits_output.full_logits, dim=-1)
+            # Get logits for the current block only
+            block_logits = logits_output.full_logits[block_start:]
+
+            # Compute predictions and confidence
+            x = torch.argmax(block_logits, dim=-1)
             p = torch.squeeze(
                 torch.gather(
-                    F.softmax(logits_output.full_logits, dim=-1),
+                    F.softmax(block_logits, dim=-1),
                     dim=-1,
                     index=torch.unsqueeze(x, -1),
                 ),
                 -1,
             )
 
-            # Only update mask positions
-            x = torch.where(mask_index, x, forward_batch.input_ids)
-            confidence = torch.where(mask_index, p, -np.inf)
+            # Only consider mask positions for transfer
+            confidence = torch.where(
+                mask_index_block, p, torch.tensor(-np.inf, device=device)
+            )
 
+            # Select tokens to transfer based on confidence threshold
             transfer_index = confidence > self.threshold
             if transfer_index.sum().item() == 0:
                 _, select_index = torch.topk(confidence, k=1)
                 transfer_index[select_index] = True
 
             num_transferred = transfer_index.sum().item()
-            transferred_positions = torch.where(transfer_index)[0].tolist()
-            transferred_tokens = x[transfer_index].tolist()
-            logger.info(
-                f"iter {iter_i}: transferred {num_transferred} at positions {transferred_positions}, tokens: {transferred_tokens}"
-            )
+            if iter_i < 3:
+                transferred_positions = torch.where(transfer_index)[0].tolist()
+                transferred_tokens = x[transfer_index].tolist()
+                logger.info(
+                    f"iter {iter_i}: transferred {num_transferred} tokens at block positions {transferred_positions}, tokens: {transferred_tokens}"
+                )
 
-            forward_batch.input_ids[transfer_index] = x[transfer_index]
+            # Update full_ids with transferred tokens
+            full_ids[block_start:][transfer_index] = x[transfer_index]
 
+        # Final forward pass to get logits
+        temp_batch = self._create_full_seq_batch(
+            forward_batch, full_ids, positions, model_runner
+        )
         logits_output, can_run_cuda_graph = model_runner.forward(
-            forward_batch, pp_proxy_tensors=None
+            temp_batch, pp_proxy_tensors=None
         )
 
-        logger.info(f"final input_ids: {forward_batch.input_ids.tolist()}")
-        logger.info(
-            f"returning tokens from position {start}: {forward_batch.input_ids[start:].tolist()}"
-        )
+        # Return only the current block's tokens
+        next_token_ids = full_ids[block_start:]
+
+        logger.info(f"final block tokens: {next_token_ids.tolist()}")
         logger.info(f"=== LowConfidence.run END ===")
 
-        next_token_ids = forward_batch.input_ids[start:]
         return logits_output, next_token_ids, can_run_cuda_graph
+
+    def _create_full_seq_batch(
+        self,
+        original_batch: ForwardBatch,
+        full_ids: torch.Tensor,
+        positions: torch.Tensor,
+        model_runner: ModelRunner,
+    ) -> ForwardBatch:
+        """
+        Create a ForwardBatch for the full sequence.
+
+        Key changes:
+        - input_ids: full sequence (prompt + current block)
+        - positions: 0 to seq_len-1
+        - extend_prefix_lens_cpu: [0] to disable KV cache reading
+        - extend_seq_lens_cpu: [seq_len]
+        """
+        seq_len = len(full_ids)
+        device = full_ids.device
+
+        # Create a new batch with full sequence
+        # We set extend_prefix_lens to 0 to disable KV cache reading
+        # This forces the model to compute attention over the full sequence
+        new_batch = ForwardBatch(
+            forward_mode=original_batch.forward_mode,
+            batch_size=1,
+            input_ids=full_ids,
+            req_pool_indices=original_batch.req_pool_indices,
+            seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
+            out_cache_loc=original_batch.out_cache_loc,
+            seq_lens_sum=seq_len,
+            positions=positions,
+            extend_num_tokens=seq_len,
+            extend_seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
+            extend_prefix_lens=torch.tensor([0], dtype=torch.int32, device=device),
+            extend_start_loc=torch.tensor([0], dtype=torch.int32, device=device),
+            extend_prefix_lens_cpu=[0],
+            extend_seq_lens_cpu=[seq_len],
+            req_to_token_pool=original_batch.req_to_token_pool,
+            token_to_kv_pool=original_batch.token_to_kv_pool,
+            attn_backend=original_batch.attn_backend,
+            sampling_info=original_batch.sampling_info,
+        )
+
+        return new_batch
 
 
 Algorithm = LowConfidence
