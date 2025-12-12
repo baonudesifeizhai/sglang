@@ -145,16 +145,12 @@ class LowConfidence(DllmAlgorithm):
         # Get embeddings
         hidden_states = model.model.embed_tokens(input_ids)
 
-        # Create a simple attention mask (all tokens can see all tokens)
-        # For bidirectional attention, we don't need a causal mask
-
         # Forward through transformer layers
         residual = None
         for layer in model.model.layers:
             if residual is None:
                 residual = torch.zeros_like(hidden_states)
 
-            # This is a simplified forward - we need to handle the layer properly
             hidden_states, residual = self._forward_layer(
                 layer, positions, hidden_states, residual
             )
@@ -162,8 +158,11 @@ class LowConfidence(DllmAlgorithm):
         # Final layer norm
         hidden_states = model.model.norm(hidden_states + residual)
 
-        # Get logits
-        logits = model.lm_head(hidden_states)
+        # Get logits by directly using lm_head weights
+        # ParallelLMHead.forward() is disabled, so we compute logits manually
+        logits = torch.matmul(hidden_states, model.lm_head.weight.t())
+        if hasattr(model.lm_head, "bias") and model.lm_head.bias is not None:
+            logits = logits + model.lm_head.bias
 
         return logits
 
