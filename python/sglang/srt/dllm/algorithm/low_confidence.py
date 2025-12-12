@@ -117,14 +117,10 @@ class LowConfidence(DllmAlgorithm):
             f"=== LowConfidence END === generated: {next_token_ids[:10].tolist()}..."
         )
 
-        # Return a dummy logits_output (we don't need it for dLLM)
+        # Return a logits_output with full_logits for dLLM
         logits_output = LogitsProcessorOutput(
             next_token_logits=logits[-1:],  # Last token logits
-            next_token_logprobs=None,
-            normalized_prompt_logprobs=None,
-            input_token_logprobs=None,
-            output_top_logprobs=None,
-            input_top_logprobs=None,
+            full_logits=logits,  # Full logits for dLLM
         )
 
         return logits_output, next_token_ids, False  # can_run_cuda_graph = False
