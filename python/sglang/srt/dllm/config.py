@@ -18,9 +18,7 @@ class DllmConfig:
         self.mask_id = mask_id
 
     @staticmethod
-    def from_server_args(
-        server_args: ServerArgs,
-    ):
+    def from_server_args(server_args: ServerArgs):
         if server_args.dllm_algorithm is None:
             return None
 
@@ -30,27 +28,26 @@ class DllmConfig:
             model_revision=server_args.revision,
         )
 
-        if model_config.hf_config.architectures[0] == "LLaDA2MoeModelLM":
+        hf_config = model_config.hf_config
+        arch = hf_config.architectures[0]
+
+        # Get block_size and mask_id based on architecture
+        if arch == "LLaDA2MoeModelLM":
             block_size = 32
             mask_id = 156895
+        elif arch == "FastDLLMForCausalLM":
+            block_size = getattr(hf_config, "bd_size", 32)
+            mask_id = getattr(hf_config, "mask_token_id", 151665)
         else:
-            raise RuntimeError(
-                f"Unknown diffusion LLM: {model_config.hf_config.architectures[0]}"
-            )
+            raise RuntimeError(f"Unknown diffusion LLM: {arch}")
 
+        # Load algorithm config from YAML if provided
         algorithm_config = {}
         if server_args.dllm_algorithm_config is not None:
-            try:
-                import yaml
-            except ImportError:
-                raise ImportError(
-                    "Please install PyYAML to use YAML config files. "
-                    "`pip install pyyaml`"
-                )
+            import yaml
+
             with open(server_args.dllm_algorithm_config, "r") as f:
                 algorithm_config = yaml.safe_load(f)
-
-            # Parse common algorithm configurations
             block_size = algorithm_config.get("block_size", block_size)
 
         return DllmConfig(
