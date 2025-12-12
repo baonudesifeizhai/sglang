@@ -1,11 +1,7 @@
 """
 LowConfidence decoding algorithm for diffusion LLM.
 
-For dLLM, we bypass SGLang's KV cache mechanism and directly call the model
-with the full sequence in each iteration. This is necessary because:
-1. dLLM needs bidirectional attention (each token sees all other tokens)
-2. The current block's tokens change during iteration (mask → generated token)
-3. Each iteration needs to recompute attention for the current block
+For dLLM, we need bidirectional attention and iterative mask filling.
 """
 
 import logging
@@ -37,12 +33,6 @@ class LowConfidence(DllmAlgorithm):
     ) -> Tuple[
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
-        """
-        Run LowConfidence decoding for dLLM.
-
-        We directly call the model with the full sequence, bypassing SGLang's
-        KV cache and attention backend machinery.
-        """
         device = forward_batch.input_ids.device
 
         # Get the request
@@ -50,13 +40,22 @@ class LowConfidence(DllmAlgorithm):
         assert forward_batch.reqs is not None, "reqs must be provided for dLLM"
         req = forward_batch.reqs[0]
 
-        # Get full sequence: prompt + current block (with masks)
+        # fill_ids = origin_input_ids + [mask_id] * block_size
+        # We need to find where the masks start
         full_ids = torch.tensor(req.fill_ids, dtype=torch.int64, device=device)
         seq_len = len(full_ids)
-        block_start = seq_len - self.block_size
+
+        # Find the first mask token position - that's where generated content starts
+        mask_positions = (full_ids == self.mask_id).nonzero(as_tuple=True)[0]
+        if len(mask_positions) > 0:
+            output_start = mask_positions[0].item()
+        else:
+            # No masks - shouldn't happen, but handle gracefully
+            output_start = seq_len
 
         logger.info(
-            f"=== LowConfidence START === seq_len={seq_len}, block_start={block_start}"
+            f"=== LowConfidence START === seq_len={seq_len}, output_start={output_start}, "
+            f"num_masks={len(mask_positions)}"
         )
 
         # Create position ids
@@ -64,27 +63,23 @@ class LowConfidence(DllmAlgorithm):
 
         # Iteratively fill mask tokens
         for iter_i in range(self.block_size):
-            # Check remaining masks in current block
-            current_block = full_ids[block_start:]
-            mask_index = current_block == self.mask_id
+            # Check remaining masks
+            mask_index = full_ids == self.mask_id
             remaining_masks = mask_index.sum().item()
 
             if remaining_masks == 0:
                 break
 
-            # Direct model forward (bypass SGLang's forward_batch machinery)
+            # Forward through model with bidirectional attention
             with torch.no_grad():
-                logits = self._direct_model_forward(model_runner, full_ids, positions)
+                logits = self._forward_bidirectional(model_runner, full_ids, positions)
 
-            # Get logits for current block
-            block_logits = logits[block_start:]
-
-            # Compute predictions and confidence
-            pred_tokens = torch.argmax(block_logits, dim=-1)
-            probs = F.softmax(block_logits, dim=-1)
+            # Compute predictions and confidence for ALL positions
+            pred_tokens = torch.argmax(logits, dim=-1)
+            probs = F.softmax(logits, dim=-1)
             confidence = probs.gather(-1, pred_tokens.unsqueeze(-1)).squeeze(-1)
 
-            # Only consider mask positions
+            # Only consider mask positions for transfer
             confidence = torch.where(
                 mask_index, confidence, torch.tensor(-np.inf, device=device)
             )
@@ -94,12 +89,11 @@ class LowConfidence(DllmAlgorithm):
             if not transfer_mask.any():
                 # Transfer at least one token (highest confidence)
                 best_idx = confidence.argmax()
+                transfer_mask = torch.zeros_like(mask_index)
                 transfer_mask[best_idx] = True
 
             # Update full_ids with transferred tokens
-            full_ids[block_start:] = torch.where(
-                transfer_mask, pred_tokens, current_block
-            )
+            full_ids = torch.where(transfer_mask, pred_tokens, full_ids)
 
             if iter_i < 3:
                 n_transferred = transfer_mask.sum().item()
@@ -107,89 +101,84 @@ class LowConfidence(DllmAlgorithm):
                     f"iter {iter_i}: transferred {n_transferred}, remaining {remaining_masks - n_transferred}"
                 )
 
-        # Extract the generated block
-        next_token_ids = full_ids[block_start:].clone()
+        # Extract only the generated tokens (from output_start to end)
+        next_token_ids = full_ids[output_start:]
 
-        # Update req.fill_ids with generated tokens (for next block)
-        req.fill_ids[block_start:] = next_token_ids.tolist()
+        # Update req.fill_ids with generated tokens
+        req.fill_ids = full_ids.tolist()
 
         logger.info(
             f"=== LowConfidence END === generated: {next_token_ids[:10].tolist()}..."
         )
 
-        # Return a logits_output with full_logits for dLLM
+        # Return logits output
         logits_output = LogitsProcessorOutput(
-            next_token_logits=logits[-1:],  # Last token logits
-            full_logits=logits,  # Full logits for dLLM
+            next_token_logits=logits[-1:] if logits is not None else None,
+            full_logits=logits,
         )
 
-        return logits_output, next_token_ids, False  # can_run_cuda_graph = False
+        return logits_output, next_token_ids, False
 
-    def _direct_model_forward(
+    def _forward_bidirectional(
         self,
         model_runner: ModelRunner,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Directly call the model without SGLang's ForwardBatch machinery.
-
-        This bypasses KV cache and uses simple bidirectional attention.
+        Forward through model with bidirectional attention.
+        Uses PyTorch's scaled_dot_product_attention for simplicity.
         """
         model = model_runner.model
+        seq_len = len(input_ids)
 
-        # Get embeddings
+        # Get embeddings [seq_len, hidden_size]
         hidden_states = model.model.embed_tokens(input_ids)
 
         # Forward through transformer layers
         residual = None
         for layer in model.model.layers:
-            if residual is None:
-                residual = torch.zeros_like(hidden_states)
-
-            hidden_states, residual = self._forward_layer(
+            hidden_states, residual = self._forward_layer_bidirectional(
                 layer, positions, hidden_states, residual
             )
 
         # Final layer norm
-        hidden_states = model.model.norm(hidden_states + residual)
+        hidden_states, _ = model.model.norm(hidden_states, residual)
 
-        # Get logits by directly using lm_head weights
-        # ParallelLMHead.forward() is disabled, so we compute logits manually
-        logits = torch.matmul(hidden_states, model.lm_head.weight.t())
-        if hasattr(model.lm_head, "bias") and model.lm_head.bias is not None:
-            logits = logits + model.lm_head.bias
+        # Compute logits using lm_head weights directly
+        logits = F.linear(hidden_states, model.lm_head.weight)
 
         return logits
 
-    def _forward_layer(
+    def _forward_layer_bidirectional(
         self,
         layer,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward through a single transformer layer with bidirectional attention.
+        Forward through a decoder layer with bidirectional attention.
         """
-        # Input layernorm
-        hidden_states = layer.input_layernorm(hidden_states + residual)
+        seq_len = hidden_states.shape[0]
 
-        # Self attention (we need to implement bidirectional attention)
+        # Input layernorm (fused with residual)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = layer.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+
+        # Self attention with bidirectional mask
         attn_output = self._bidirectional_attention(
             layer.self_attn, positions, hidden_states
         )
 
-        # Residual connection
-        residual = hidden_states
-        hidden_states = attn_output
+        # Post attention layernorm (fused with residual)
+        hidden_states, residual = layer.post_attention_layernorm(attn_output, residual)
 
-        # Post attention layernorm + MLP
-        hidden_states = layer.post_attention_layernorm(hidden_states + residual)
-        mlp_output = layer.mlp(hidden_states)
-
-        residual = hidden_states
-        hidden_states = mlp_output
+        # MLP
+        hidden_states = layer.mlp(hidden_states)
 
         return hidden_states, residual
 
@@ -200,8 +189,10 @@ class LowConfidence(DllmAlgorithm):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute bidirectional self-attention.
+        Compute bidirectional self-attention using PyTorch's SDPA.
         """
+        seq_len = hidden_states.shape[0]
+
         # Get Q, K, V
         qkv, _ = attn_module.qkv_proj(hidden_states)
         q, k, v = qkv.split(
@@ -211,39 +202,31 @@ class LowConfidence(DllmAlgorithm):
         # Apply rotary embeddings
         q, k = attn_module.rotary_emb(positions, q, k)
 
-        # Reshape for attention
-        seq_len = hidden_states.shape[0]
+        # Reshape for attention: [seq_len, hidden] -> [1, num_heads, seq_len, head_dim]
         num_heads = attn_module.num_heads
         num_kv_heads = attn_module.num_kv_heads
         head_dim = attn_module.head_dim
 
-        q = q.view(seq_len, num_heads, head_dim)
-        k = k.view(seq_len, num_kv_heads, head_dim)
-        v = v.view(seq_len, num_kv_heads, head_dim)
+        q = q.view(seq_len, num_heads, head_dim).transpose(0, 1).unsqueeze(0)
+        k = k.view(seq_len, num_kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+        v = v.view(seq_len, num_kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
 
-        # Expand KV heads if needed (GQA)
+        # Expand KV heads for GQA
         if num_kv_heads < num_heads:
             n_rep = num_heads // num_kv_heads
             k = k.repeat_interleave(n_rep, dim=1)
             v = v.repeat_interleave(n_rep, dim=1)
 
-        # Compute attention scores (bidirectional - no causal mask)
-        # [seq_len, num_heads, head_dim] -> [num_heads, seq_len, head_dim]
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
+        # Scaled dot-product attention (bidirectional - no causal mask)
+        # Shape: [1, num_heads, seq_len, head_dim]
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, is_causal=False
+        )
 
-        # Scaled dot-product attention
-        scale = 1.0 / (head_dim**0.5)
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)
-
-        # Reshape back
-        attn_output = attn_output.transpose(
-            0, 1
-        ).contiguous()  # [seq_len, num_heads, head_dim]
-        attn_output = attn_output.view(seq_len, num_heads * head_dim)
+        # Reshape back: [1, num_heads, seq_len, head_dim] -> [seq_len, hidden]
+        attn_output = (
+            attn_output.squeeze(0).transpose(0, 1).contiguous().view(seq_len, -1)
+        )
 
         # Output projection
         output, _ = attn_module.o_proj(attn_output)
