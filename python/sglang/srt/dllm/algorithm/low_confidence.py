@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from sglang.srt.dllm.algorithm.base import DllmAlgorithm
 from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,12 @@ class LowConfidence(DllmAlgorithm):
         assert forward_batch.reqs is not None, "reqs must be provided for dLLM"
         req = forward_batch.reqs[0]
 
+        logger.info(f"=== LowConfidence.run START ===")
+        logger.info(f"origin_input_ids length: {len(req.origin_input_ids)}")
+        logger.info(f"fill_ids length: {len(req.fill_ids)}")
+        logger.info(f"prefix_indices length: {len(req.prefix_indices)}")
+        logger.info(f"forward_batch.input_ids length: {len(forward_batch.input_ids)}")
+
         # Get the full sequence (prompt + all previous blocks + current block masks)
         full_ids = torch.tensor(req.fill_ids, dtype=torch.int64, device=device)
         seq_len = len(full_ids)
@@ -63,7 +69,6 @@ class LowConfidence(DllmAlgorithm):
         # This is where the new tokens will be generated
         block_start = seq_len - self.block_size
 
-        logger.info(f"=== LowConfidence.run START ===")
         logger.info(f"full_ids length: {seq_len}, block_start: {block_start}")
         logger.info(f"full_ids last 40: {full_ids[-40:].tolist()}")
 
@@ -189,6 +194,7 @@ class LowConfidence(DllmAlgorithm):
             token_to_kv_pool=original_batch.token_to_kv_pool,
             attn_backend=original_batch.attn_backend,
             sampling_info=original_batch.sampling_info,
+            capture_hidden_mode=CaptureHiddenMode.NULL,
         )
 
         return new_batch
