@@ -35,7 +35,7 @@ class DllmConfig:
         if arch == "LLaDA2MoeModelLM":
             block_size = 32
             mask_id = 156895
-        elif arch == "FastDLLMForCausalLM":
+        elif arch in ("FastDLLMForCausalLM", "Fast_dLLM_QwenForCausalLM"):
             block_size = getattr(hf_config, "bd_size", 32)
             mask_id = getattr(hf_config, "mask_token_id", 151665)
         else:

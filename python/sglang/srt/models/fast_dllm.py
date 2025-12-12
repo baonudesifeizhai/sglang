@@ -257,4 +257,7 @@ class FastDLLMForCausalLM(Qwen2ForCausalLM):
         self.capture_aux_hidden_states = False
 
 
-EntryClass = FastDLLMForCausalLM
+# Also register as Fast_dLLM_QwenForCausalLM for HuggingFace model compatibility
+Fast_dLLM_QwenForCausalLM = FastDLLMForCausalLM
+
+EntryClass = [FastDLLMForCausalLM, Fast_dLLM_QwenForCausalLM]
