@@ -276,7 +276,8 @@ class LowConfidence(DllmAlgorithm):
             v = v.repeat_interleave(n_rep, dim=1)
 
         # Expand attention mask for batch and heads: [seq, seq] -> [1, 1, seq, seq]
-        attn_mask_expanded = attn_mask.unsqueeze(0).unsqueeze(0)
+        # Must match query dtype
+        attn_mask_expanded = attn_mask.unsqueeze(0).unsqueeze(0).to(dtype=q.dtype)
 
         # Scaled dot-product attention with custom mask
         attn_output = F.scaled_dot_product_attention(
