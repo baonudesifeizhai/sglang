@@ -799,9 +799,6 @@ class FlashInferAttnBackend(AttentionBackend):
                 or layer.attn_type == AttentionType.ENCODER_ONLY
             ):
                 causal = False
-            # For dLLM models, use bidirectional attention
-            if self.is_dllm_model:
-                causal = False
             if save_kv_cache and layer.attn_type == AttentionType.ENCODER_ONLY:
                 save_kv_cache = False
 
