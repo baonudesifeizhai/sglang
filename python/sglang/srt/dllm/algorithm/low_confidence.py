@@ -30,14 +30,25 @@ class LowConfidence(DllmAlgorithm):
     ) -> Tuple[
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
+        # Debug: check what we have
+        logger.info(f"=== LowConfidence.run START ===")
+        logger.info(f"input_ids shape: {forward_batch.input_ids.shape}")
+        logger.info(f"input_ids: {forward_batch.input_ids.tolist()}")
+        logger.info(f"mask_id: {self.mask_id}")
+        logger.info(f"extend_prefix_lens_cpu: {forward_batch.extend_prefix_lens_cpu}")
+        logger.info(f"extend_seq_lens_cpu: {forward_batch.extend_seq_lens_cpu}")
+        logger.info(f"forward_mode: {forward_batch.forward_mode}")
+
+        # Check positions
+        if forward_batch.positions is not None:
+            logger.info(f"positions: {forward_batch.positions.tolist()}")
+
         # input_ids contains the entire sequence (prefix + mask tokens)
         # We need to find where the mask tokens start
         mask_index = forward_batch.input_ids == self.mask_id
         num_masks = torch.sum(mask_index).item()
 
-        logger.info(f"input_ids shape: {forward_batch.input_ids.shape}")
-        logger.info(f"input_ids: {forward_batch.input_ids.tolist()}")
-        logger.info(f"mask_id: {self.mask_id}, num_masks: {num_masks}")
+        logger.info(f"num_masks: {num_masks}")
 
         # Find the start position of mask tokens (first mask position)
         if num_masks > 0:
@@ -99,6 +110,7 @@ class LowConfidence(DllmAlgorithm):
         logger.info(
             f"returning tokens from position {start}: {forward_batch.input_ids[start:].tolist()}"
         )
+        logger.info(f"=== LowConfidence.run END ===")
 
         next_token_ids = forward_batch.input_ids[start:]
         return logits_output, next_token_ids, can_run_cuda_graph
