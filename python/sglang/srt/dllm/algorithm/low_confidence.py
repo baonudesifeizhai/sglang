@@ -95,17 +95,22 @@ class LowConfidence(DllmAlgorithm):
             # Update full_ids with transferred tokens
             full_ids = torch.where(transfer_mask, pred_tokens, full_ids)
 
+            n_transferred = transfer_mask.sum().item()
             if iter_i < 3:
-                n_transferred = transfer_mask.sum().item()
+                # Debug: show what tokens are being generated
+                transferred_tokens = pred_tokens[transfer_mask].tolist()
+                transferred_conf = confidence[transfer_mask].tolist()
                 logger.info(
-                    f"iter {iter_i}: transferred {n_transferred}, remaining {remaining_masks - n_transferred}"
+                    f"iter {iter_i}: transferred {n_transferred}, remaining {remaining_masks - n_transferred}, "
+                    f"tokens={transferred_tokens[:5]}, conf={[f'{c:.3f}' for c in transferred_conf[:5]]}"
                 )
 
-        # Extract only the generated tokens (from output_start to end)
+        # Extract only the newly generated tokens (the masks that were filled)
         next_token_ids = full_ids[output_start:]
 
-        # Update req.fill_ids with generated tokens
-        req.fill_ids = full_ids.tolist()
+        # Update req.fill_ids: replace the mask tokens with generated tokens
+        for i, token_id in enumerate(next_token_ids.tolist()):
+            req.fill_ids[output_start + i] = token_id
 
         logger.info(
             f"=== LowConfidence END === generated: {next_token_ids[:10].tolist()}..."
