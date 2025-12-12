@@ -1,13 +1,15 @@
 """
 LowConfidence decoding algorithm for diffusion LLM.
 
-For dLLM, we need bidirectional attention and iterative mask filling.
+Based on Fast_dLLM's official implementation:
+- Uses block-causal attention (not fully bidirectional)
+- Each block can see previous blocks but not future blocks
+- Iteratively fills mask tokens within each block
 """
 
 import logging
 from typing import Optional, Tuple, Union
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -40,77 +42,89 @@ class LowConfidence(DllmAlgorithm):
         assert forward_batch.reqs is not None, "reqs must be provided for dLLM"
         req = forward_batch.reqs[0]
 
-        # fill_ids = origin_input_ids + [mask_id] * block_size
-        # We need to find where the masks start
+        # fill_ids = origin_input_ids + [mask_id] * block_size (for current block)
         full_ids = torch.tensor(req.fill_ids, dtype=torch.int64, device=device)
         seq_len = len(full_ids)
 
-        # Find the first mask token position - that's where generated content starts
+        # Find the first mask token position - that's where current block starts
         mask_positions = (full_ids == self.mask_id).nonzero(as_tuple=True)[0]
         if len(mask_positions) > 0:
-            output_start = mask_positions[0].item()
+            block_start = mask_positions[0].item()
         else:
-            # No masks - shouldn't happen, but handle gracefully
-            output_start = seq_len
+            # No masks - shouldn't happen
+            block_start = seq_len
+
+        num_masks = len(mask_positions)
 
         logger.info(
-            f"=== LowConfidence START === seq_len={seq_len}, output_start={output_start}, "
-            f"num_masks={len(mask_positions)}"
+            f"=== LowConfidence START === seq_len={seq_len}, block_start={block_start}, "
+            f"num_masks={num_masks}"
         )
 
-        # Create position ids
+        # Create position ids for the CURRENT BLOCK only (not the full sequence)
+        # This matches Fast_dLLM's behavior where positions are relative to block start
         positions = torch.arange(seq_len, dtype=torch.int64, device=device)
 
-        # Iteratively fill mask tokens
+        # Iteratively fill mask tokens in current block
         for iter_i in range(self.block_size):
-            # Check remaining masks
+            # Check remaining masks in the current block
             mask_index = full_ids == self.mask_id
             remaining_masks = mask_index.sum().item()
 
             if remaining_masks == 0:
                 break
 
-            # Forward through model with bidirectional attention
+            # Forward through model with block-causal attention
             with torch.no_grad():
-                logits = self._forward_bidirectional(model_runner, full_ids, positions)
+                logits = self._forward_block_causal(
+                    model_runner, full_ids, positions, self.block_size
+                )
 
-            # Compute predictions and confidence for ALL positions
+            # IMPORTANT: Shift logits like Fast_dLLM does
+            # logits = torch.cat([logits[:1], logits[:-1]], dim=0)
+            # Actually, for dLLM the logits at position i predict token at position i
+            # So we need logits from the PREVIOUS position to predict current
+            # But in SGLang, we directly use position i's logits for position i
+
+            # Get predictions for mask positions only
             pred_tokens = torch.argmax(logits, dim=-1)
             probs = F.softmax(logits, dim=-1)
             confidence = probs.gather(-1, pred_tokens.unsqueeze(-1)).squeeze(-1)
 
             # Only consider mask positions for transfer
             confidence = torch.where(
-                mask_index, confidence, torch.tensor(-np.inf, device=device)
+                mask_index, confidence, torch.tensor(-float("inf"), device=device)
             )
 
-            # Select tokens to transfer
-            transfer_mask = confidence > self.threshold
-            if not transfer_mask.any():
-                # Transfer at least one token (highest confidence)
-                best_idx = confidence.argmax()
-                transfer_mask = torch.zeros_like(mask_index)
-                transfer_mask[best_idx] = True
+            # Find tokens to unmask based on threshold
+            unmask_idx = confidence > self.threshold
 
-            # Update full_ids with transferred tokens
-            full_ids = torch.where(transfer_mask, pred_tokens, full_ids)
+            # Always unmask at least one token (the highest confidence one)
+            if unmask_idx.sum() == 0:
+                max_conf_idx = confidence.argmax()
+                unmask_idx[max_conf_idx] = True
 
-            n_transferred = transfer_mask.sum().item()
+            # Only unmask positions that are currently masked
+            unmask_idx = unmask_idx & mask_index
+
+            n_transferred = unmask_idx.sum().item()
             if iter_i < 3:
-                # Debug: show what tokens are being generated
-                transferred_tokens = pred_tokens[transfer_mask].tolist()
-                transferred_conf = confidence[transfer_mask].tolist()
+                transferred_tokens = pred_tokens[unmask_idx].tolist()
+                transferred_conf = confidence[unmask_idx].tolist()
                 logger.info(
                     f"iter {iter_i}: transferred {n_transferred}, remaining {remaining_masks - n_transferred}, "
                     f"tokens={transferred_tokens[:5]}, conf={[f'{c:.3f}' for c in transferred_conf[:5]]}"
                 )
 
-        # Extract only the newly generated tokens (the masks that were filled)
-        next_token_ids = full_ids[output_start:]
+            # Update full_ids with predicted tokens
+            full_ids[unmask_idx] = pred_tokens[unmask_idx]
 
-        # Update req.fill_ids: replace the mask tokens with generated tokens
+        # Extract only the newly generated tokens (from block_start to end)
+        next_token_ids = full_ids[block_start:]
+
+        # Update req.fill_ids with the generated tokens
         for i, token_id in enumerate(next_token_ids.tolist()):
-            req.fill_ids[output_start + i] = token_id
+            req.fill_ids[block_start + i] = token_id
 
         logger.info(
             f"=== LowConfidence END === generated: {next_token_ids[:10].tolist()}..."
@@ -124,77 +138,116 @@ class LowConfidence(DllmAlgorithm):
 
         return logits_output, next_token_ids, False
 
-    def _forward_bidirectional(
+    def _forward_block_causal(
         self,
         model_runner: ModelRunner,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        block_size: int,
     ) -> torch.Tensor:
         """
-        Forward through model with bidirectional attention.
-        Uses PyTorch's scaled_dot_product_attention for simplicity.
+        Forward with block-causal attention mask.
+
+        Block-causal means: tokens in block i can attend to all tokens in blocks <= i
         """
         model = model_runner.model
-        seq_len = len(input_ids)
+        seq_len = input_ids.shape[0]
 
-        # Get embeddings [seq_len, hidden_size]
+        # Get embeddings
         hidden_states = model.model.embed_tokens(input_ids)
 
+        # Create block-causal attention mask
+        # block_q >= block_kv means current block can see previous blocks
+        attn_mask = self._create_block_causal_mask(
+            seq_len, block_size, input_ids.device
+        )
+
         # Forward through transformer layers
-        residual = None
         for layer in model.model.layers:
-            hidden_states, residual = self._forward_layer_bidirectional(
-                layer, positions, hidden_states, residual
+            hidden_states = self._forward_layer_with_mask(
+                layer, positions, hidden_states, attn_mask
             )
 
         # Final layer norm
-        hidden_states, _ = model.model.norm(hidden_states, residual)
+        hidden_states = model.model.norm(hidden_states)
 
-        # Compute logits using lm_head weights directly
-        logits = F.linear(hidden_states, model.lm_head.weight)
+        # Compute logits
+        logits = torch.matmul(hidden_states, model.lm_head.weight.t())
+        if hasattr(model.lm_head, "bias") and model.lm_head.bias is not None:
+            logits = logits + model.lm_head.bias
 
         return logits
 
-    def _forward_layer_bidirectional(
+    def _create_block_causal_mask(
+        self, seq_len: int, block_size: int, device: torch.device
+    ) -> torch.Tensor:
+        """
+        Create block-causal attention mask.
+
+        For position q_idx attending to position kv_idx:
+        - block_q = q_idx // block_size
+        - block_kv = kv_idx // block_size
+        - Allow attention if block_q >= block_kv
+        """
+        q_idx = torch.arange(seq_len, device=device).unsqueeze(1)
+        kv_idx = torch.arange(seq_len, device=device).unsqueeze(0)
+
+        block_q = q_idx // block_size
+        block_kv = kv_idx // block_size
+
+        # True where attention is allowed
+        mask = block_q >= block_kv
+
+        # Convert to attention mask format (0 for allowed, -inf for blocked)
+        attn_mask = torch.where(
+            mask,
+            torch.tensor(0.0, device=device),
+            torch.tensor(-float("inf"), device=device),
+        )
+
+        return attn_mask
+
+    def _forward_layer_with_mask(
         self,
         layer,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        attn_mask: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        Forward through a decoder layer with bidirectional attention.
+        Forward through a decoder layer with custom attention mask.
         """
         seq_len = hidden_states.shape[0]
 
-        # Input layernorm (fused with residual)
-        if residual is None:
-            residual = hidden_states
-            hidden_states = layer.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+        # Input layernorm
+        residual = hidden_states
+        hidden_states = layer.input_layernorm(hidden_states)
 
-        # Self attention with bidirectional mask
-        attn_output = self._bidirectional_attention(
-            layer.self_attn, positions, hidden_states
+        # Self attention with block-causal mask
+        attn_output = self._attention_with_mask(
+            layer.self_attn, positions, hidden_states, attn_mask
         )
 
-        # Post attention layernorm (fused with residual)
-        hidden_states, residual = layer.post_attention_layernorm(attn_output, residual)
+        # Residual connection
+        hidden_states = residual + attn_output
 
-        # MLP
+        # Post attention layernorm + MLP
+        residual = hidden_states
+        hidden_states = layer.post_attention_layernorm(hidden_states)
         hidden_states = layer.mlp(hidden_states)
+        hidden_states = residual + hidden_states
 
-        return hidden_states, residual
+        return hidden_states
 
-    def _bidirectional_attention(
+    def _attention_with_mask(
         self,
         attn_module,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        attn_mask: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute bidirectional self-attention using PyTorch's SDPA.
+        Compute self-attention with custom mask using PyTorch's SDPA.
         """
         seq_len = hidden_states.shape[0]
 
@@ -222,10 +275,12 @@ class LowConfidence(DllmAlgorithm):
             k = k.repeat_interleave(n_rep, dim=1)
             v = v.repeat_interleave(n_rep, dim=1)
 
-        # Scaled dot-product attention (bidirectional - no causal mask)
-        # Shape: [1, num_heads, seq_len, head_dim]
+        # Expand attention mask for batch and heads: [seq, seq] -> [1, 1, seq, seq]
+        attn_mask_expanded = attn_mask.unsqueeze(0).unsqueeze(0)
+
+        # Scaled dot-product attention with custom mask
         attn_output = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, is_causal=False
+            q, k, v, attn_mask=attn_mask_expanded, is_causal=False
         )
 
         # Reshape back: [1, num_heads, seq_len, head_dim] -> [seq_len, hidden]
