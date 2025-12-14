@@ -23,6 +23,7 @@ Reference: https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B
 import logging
 from typing import Optional
 
+from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 
@@ -48,6 +49,10 @@ class FastDLLMForCausalLM(Qwen2ForCausalLM):
         # Fast_dLLM specific config
         self.bd_size = getattr(config, "bd_size", 32)
         self.mask_token_id = getattr(config, "mask_token_id", 151665)
+
+        # Override logits_processor to enable return_full_logits for dLLM
+        # This is required for dLLM algorithms to access full sequence logits
+        self.logits_processor = LogitsProcessor(config, return_full_logits=True)
 
         logger.info(
             f"FastDLLM initialized: bd_size={self.bd_size}, "
