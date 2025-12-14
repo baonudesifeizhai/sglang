@@ -52,12 +52,17 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
         super().__init__(config)
         # Fast_dLLM specific parameters
         self.bd_size = self.block_size  # Block diffusion size (same as block_size)
+        self.small_block_size = config.algorithm_config.get(
+            "small_block_size", 8
+        )  # Sub-block size for parallel decoding
         self.max_iterations = config.algorithm_config.get(
             "max_iterations", self.block_size
         )
         self.confidence_threshold = config.algorithm_config.get(
-            "confidence_threshold", 0.0
-        )
+            "threshold", 0.0
+        )  # Default: 0.0 (fill all), 1.0 (very conservative)
+        self.top_p = config.algorithm_config.get("top_p", 0.95)
+        self.temperature = config.algorithm_config.get("temperature", 0.0)
 
         # Cache management for hierarchical caching
         # Block-level cache: stores completed blocks
@@ -69,7 +74,7 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
 
     def _apply_token_shift(self, logits: torch.Tensor) -> torch.Tensor:
         """
-        Apply token shift mechanism.
+        Apply token shift mechanism (Fast_dLLM specific).
 
         Shifts logits to preserve autoregressive characteristics:
         logits_shifted = concat([logits[:, :1], logits[:, :-1]], dim=1)
@@ -77,7 +82,7 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
         This allows bidirectional context within blocks while maintaining AR objectives.
 
         Args:
-            logits: Logits tensor of shape (num_tokens, vocab_size) or (batch, seq_len, vocab_size)
+            logits: Logits tensor of shape (batch, seq_len, vocab_size)
 
         Returns:
             Shifted logits tensor
@@ -85,16 +90,81 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
         if logits.dim() == 2:
             # Shape: (num_tokens, vocab_size) - add batch dimension
             logits = logits.unsqueeze(0)  # (1, num_tokens, vocab_size)
-            if logits.shape[1] <= 1:
-                return logits.squeeze(0)
-            shifted = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
-            return shifted.squeeze(0)  # Remove batch dimension
+        if logits.shape[1] <= 1:
+            return logits.squeeze(0) if logits.dim() == 3 else logits
+        # Apply token shift: keep first token, shift rest
+        shifted = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
+        return (
+            shifted.squeeze(0)
+            if logits.dim() == 3 and shifted.shape[0] == 1
+            else shifted
+        )
+
+    def _sample_with_top_p(
+        self, logits: torch.Tensor, top_p: float = 0.95, temperature: float = 1.0
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample tokens with top-p (nucleus) sampling.
+
+        Args:
+            logits: Logits tensor of shape (batch, seq_len, vocab_size) or (seq_len, vocab_size)
+            top_p: Nucleus sampling parameter
+            temperature: Temperature for sampling
+
+        Returns:
+            Tuple of (sampled_token_ids, probabilities)
+        """
+        if logits.dim() == 2:
+            logits = logits.unsqueeze(0)
+            squeeze_output = True
         else:
-            # Shape: (batch, seq_len, vocab_size)
-            if logits.shape[1] <= 1:
-                return logits
-            shifted = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
-            return shifted
+            squeeze_output = False
+
+        # Calculate probabilities
+        if temperature > 0:
+            scaled_logits = logits / temperature
+            probs = F.softmax(scaled_logits, dim=-1)
+        else:
+            probs = F.softmax(logits, dim=-1)
+            x_1 = probs.argmax(dim=-1)
+            if squeeze_output:
+                return x_1.squeeze(0), probs.squeeze(0)
+            return x_1, probs
+
+        # Top-p (nucleus) sampling
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        indices_to_remove = torch.zeros_like(probs, dtype=torch.bool).scatter_(
+            dim=-1, index=sorted_indices, src=sorted_indices_to_remove
+        )
+
+        probs[indices_to_remove] = 0
+        probs_sum = torch.sum(probs, dim=-1, keepdim=True)
+        normalized_probs = probs / probs_sum
+
+        # Sample from normalized distribution
+        if normalized_probs.shape[0] == 1:
+            x_1 = (
+                torch.multinomial(normalized_probs[0], num_samples=1)
+                .unsqueeze(0)
+                .squeeze(-1)
+            )
+        else:
+            x_1 = torch.stack(
+                [
+                    torch.multinomial(normalized_probs[i], num_samples=1).squeeze(-1)
+                    for i in range(normalized_probs.shape[0])
+                ]
+            )
+
+        if squeeze_output:
+            return x_1.squeeze(0), normalized_probs.squeeze(0)
+        return x_1, normalized_probs
 
     def run(
         self,
@@ -106,11 +176,15 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
         """
         Run Fast_dLLM block diffusion algorithm.
 
+        Based on official implementation:
+        https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B
+
         Process:
         1. Identify prompt and mask positions
-        2. Iterative decoding:
+        2. Iterative block diffusion with sub-block decoding:
            - Forward pass
-           - Apply token shift
+           - Apply token shift (Fast_dLLM specific)
+           - Sample with top-p
            - Fill high-confidence tokens
         3. Return final logits and generated tokens
 
@@ -118,78 +192,93 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
         are TODO - needs to be implemented in attention layers.
         """
         # Step 1: Identify prompt and mask positions
-        input_ids = forward_batch.input_ids.clone()
-        mask_positions = input_ids == self.mask_id
-        num_masks = mask_positions.sum().item()
-
-        if num_masks == 0:
-            # No masks to fill, return as-is
-            logits_output, can_run_cuda_graph = model_runner.forward(
-                forward_batch, pp_proxy_tensors=None
-            )
-            return logits_output, input_ids, can_run_cuda_graph
-
-        # Calculate prompt length (everything before first mask)
-        prompt_len = len(input_ids) - num_masks
+        mask_index = forward_batch.input_ids == self.mask_id
+        start = len(forward_batch.input_ids) - torch.sum(mask_index).item()
 
         # Step 2: Iterative block diffusion
+        # Process in sub-blocks for parallel decoding
+        num_small_blocks = self.bd_size // self.small_block_size
+
         for iteration in range(self.max_iterations):
             # Check if all masks are filled
-            mask_positions = input_ids == self.mask_id
-            if mask_positions.sum().item() == 0:
+            mask_index = forward_batch.input_ids == self.mask_id
+            if torch.sum(mask_index).item() == 0:
                 break
 
-            # Forward pass
-            # TODO: Apply block-causal attention mask in forward pass
-            forward_batch.input_ids = input_ids
-            logits_output, can_run_cuda_graph = model_runner.forward(
-                forward_batch, pp_proxy_tensors=None
-            )
+            # Process sub-blocks
+            for small_block_idx in range(num_small_blocks):
+                small_block_start = small_block_idx * self.small_block_size
+                small_block_end = small_block_start + self.small_block_size
 
-            # Get logits for the entire sequence
-            logits = logits_output.full_logits  # Shape: (num_tokens, vocab_size)
+                # Check if there are masks in this sub-block
+                # For simplicity, process the entire block at once
+                # TODO: Implement proper sub-block processing with block cache
 
-            # Apply token shift mechanism
-            logits = self._apply_token_shift(logits)
+                # Forward pass
+                # TODO: Apply block-causal attention mask in forward pass
+                logits_output, can_run_cuda_graph = model_runner.forward(
+                    forward_batch, pp_proxy_tensors=None
+                )
 
-            # Sample tokens (greedy for now, can extend to sampling)
-            next_token_ids = torch.argmax(logits, dim=-1)
+                # Get logits for the entire sequence
+                logits = logits_output.full_logits  # Shape: (num_tokens, vocab_size)
 
-            # Fill masks based on confidence threshold
-            if self.confidence_threshold > 0:
-                probs = F.softmax(logits, dim=-1)
-                # Get confidence for predicted tokens
-                confidence = torch.gather(
-                    probs, dim=-1, index=next_token_ids.unsqueeze(-1)
-                ).squeeze(-1)
-                # Only fill high-confidence positions
-                fill_mask = mask_positions & (confidence > self.confidence_threshold)
-                # If no high-confidence tokens, fill at least one
-                if fill_mask.sum().item() == 0:
-                    # Find highest confidence mask position
-                    mask_confidence = torch.where(
-                        mask_positions,
-                        confidence,
-                        torch.tensor(-float("inf"), device=confidence.device),
-                    )
-                    _, top_idx = torch.topk(mask_confidence, k=1)
-                    fill_mask = torch.zeros_like(mask_positions)
-                    fill_mask[top_idx] = True
-            else:
-                # Fill all masks (greedy decoding)
-                fill_mask = mask_positions
+                # Convert to (batch=1, seq_len, vocab_size) for token shift
+                if logits.dim() == 2:
+                    logits = logits.unsqueeze(0)
 
-            # Update input_ids with filled tokens
-            input_ids = torch.where(fill_mask, next_token_ids, input_ids)
+                # Apply token shift mechanism (Fast_dLLM specific)
+                # This is critical for maintaining AR characteristics
+                logits = self._apply_token_shift(logits)
 
-        # Final forward pass to get logits for the completed sequence
-        forward_batch.input_ids = input_ids
+                # Sample tokens with top-p sampling
+                x_1, p_1t = self._sample_with_top_p(
+                    logits, top_p=self.top_p, temperature=self.temperature
+                )
+
+                # Remove batch dimension if added
+                if x_1.dim() == 2 and x_1.shape[0] == 1:
+                    x_1 = x_1.squeeze(0)
+                    p_1t = p_1t.squeeze(0)
+
+                # Only update mask positions, keep non-mask positions unchanged
+                x_1 = torch.where(mask_index, x_1, forward_batch.input_ids)
+
+                # Get probability for predicted tokens at mask positions
+                x1_p = torch.squeeze(
+                    torch.gather(p_1t, dim=-1, index=torch.unsqueeze(x_1, -1)), -1
+                )
+                x1_p = torch.where(
+                    mask_index, x1_p, torch.tensor(-float("inf"), device=x1_p.device)
+                )
+
+                # Fill masks based on confidence threshold
+                if self.confidence_threshold > 0:
+                    unmask_idx = x1_p > self.confidence_threshold
+                    # If no high-confidence tokens, fill at least one (highest probability)
+                    if unmask_idx.sum().item() == 0:
+                        max_prob_idx = x1_p.argmax(dim=-1)
+                        unmask_idx = torch.zeros_like(mask_index)
+                        unmask_idx[max_prob_idx] = True
+                    unmask_idx = unmask_idx & mask_index
+                else:
+                    # Fill all masks (greedy decoding)
+                    unmask_idx = mask_index
+
+                # Update input_ids with filled tokens
+                forward_batch.input_ids[unmask_idx] = x_1[unmask_idx]
+
+                # Check if all masks in current sub-block are filled
+                if mask_index[small_block_start:small_block_end].sum().item() == 0:
+                    break
+
+        # Final forward pass
         logits_output, can_run_cuda_graph = model_runner.forward(
             forward_batch, pp_proxy_tensors=None
         )
 
         # Extract generated tokens (everything after prompt)
-        next_token_ids = input_ids[prompt_len:]
+        next_token_ids = forward_batch.input_ids[start:]
 
         return logits_output, next_token_ids, can_run_cuda_graph
 
