@@ -234,30 +234,33 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
             # logits[i] represents prediction for next token after input_ids[i]
             # For mask position i, we need logits[i-1] to predict input_ids[i]
             # Token shift: logits_shifted[i] = logits[i-1] for i > 0, logits_shifted[0] = logits[0]
-            if logits.shape[0] > 1:
-                # Shift: [logits[0], logits[0], logits[1], ..., logits[n-2]]
-                # This makes logits_shifted[i] represent prediction for input_ids[i]
-                logits_shifted = torch.cat([logits[:1], logits[:-1]], dim=0)
-            else:
-                logits_shifted = logits
+            # TODO: Temporarily disable token shift to debug - check if it's causing the repetition
+            # if logits.shape[0] > 1:
+            #     # Shift: [logits[0], logits[0], logits[1], ..., logits[n-2]]
+            #     # This makes logits_shifted[i] represent prediction for input_ids[i]
+            #     logits_shifted = torch.cat([logits[:1], logits[:-1]], dim=0)
+            # else:
+            #     logits_shifted = logits
 
-            # Debug: check if predictions are diverse
-            if logits.shape[0] > 1:
+            # For now, use logits directly without shift to debug
+            logits_shifted = logits
+
+            # Debug: check if predictions are diverse at mask positions
+            if logits.shape[0] > 1 and num_remaining_masks > 0:
                 # Check first few mask positions
                 mask_positions = torch.where(mask_index)[0][
                     : min(5, num_remaining_masks)
                 ]
                 if len(mask_positions) > 0:
-                    pred_tokens_before_shift = (
-                        logits[mask_positions].argmax(dim=-1).tolist()
-                    )
-                    pred_tokens_after_shift = (
+                    # Check what tokens are predicted at mask positions
+                    pred_tokens_at_masks = (
                         logits_shifted[mask_positions].argmax(dim=-1).tolist()
                     )
-                    logger.debug(
+                    # Check if all predictions are the same
+                    unique_preds = len(set(pred_tokens_at_masks))
+                    logger.info(
                         f"[Fast_dLLM] Iter {iteration}: mask_positions={mask_positions.tolist()}, "
-                        f"pred_before_shift={pred_tokens_before_shift}, "
-                        f"pred_after_shift={pred_tokens_after_shift}"
+                        f"pred_tokens={pred_tokens_at_masks}, unique_count={unique_preds}"
                     )
 
             # Sample with top-p
