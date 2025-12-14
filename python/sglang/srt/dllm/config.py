@@ -30,13 +30,16 @@ class DllmConfig:
             model_revision=server_args.revision,
         )
 
-        if model_config.hf_config.architectures[0] == "LLaDA2MoeModelLM":
+        architecture = model_config.hf_config.architectures[0]
+        if architecture == "LLaDA2MoeModelLM":
             block_size = 32
             mask_id = 156895
+        elif architecture == "Fast_dLLM_QwenForCausalLM":
+            # Fast_dLLM v2 configuration
+            block_size = getattr(model_config.hf_config, "bd_size", 32)
+            mask_id = getattr(model_config.hf_config, "mask_token_id", 151665)
         else:
-            raise RuntimeError(
-                f"Unknown diffusion LLM: {model_config.hf_config.architectures[0]}"
-            )
+            raise RuntimeError(f"Unknown diffusion LLM: {architecture}")
 
         algorithm_config = {}
         if server_args.dllm_algorithm_config is not None:
