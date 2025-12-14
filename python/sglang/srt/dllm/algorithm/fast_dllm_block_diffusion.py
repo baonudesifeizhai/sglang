@@ -231,19 +231,28 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
             logger.debug(f"[Fast_dLLM] Iter {iteration}: logits shape={logits.shape}")
 
             # Apply token shift (Fast_dLLM core)
-            # logits[i] represents prediction for next token after input_ids[i]
-            # For mask position i, we need logits[i-1] to predict input_ids[i]
-            # Token shift: logits_shifted[i] = logits[i-1] for i > 0, logits_shifted[0] = logits[0]
-            # TODO: Temporarily disable token shift to debug - check if it's causing the repetition
-            # if logits.shape[0] > 1:
-            #     # Shift: [logits[0], logits[0], logits[1], ..., logits[n-2]]
-            #     # This makes logits_shifted[i] represent prediction for input_ids[i]
-            #     logits_shifted = torch.cat([logits[:1], logits[:-1]], dim=0)
-            # else:
-            #     logits_shifted = logits
+            # Official implementation: logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+            # This shifts logits so that logits_shifted[i] = logits[i-1] for i > 0
+            # logits[i] = prediction for next token after input_ids[i]
+            # logits_shifted[i] = prediction for input_ids[i] (using context from input_ids[0:i])
+            if logits.dim() == 2:
+                # Shape: (num_tokens, vocab_size) - add batch dimension
+                logits = logits.unsqueeze(0)  # (1, num_tokens, vocab_size)
+                needs_squeeze = True
+            else:
+                needs_squeeze = False
 
-            # For now, use logits directly without shift to debug
-            logits_shifted = logits
+            if logits.shape[1] > 1:
+                # Official token shift: [logits[:, :1, :], logits[:, :-1, :]]
+                # This makes logits_shifted[:, i, :] = logits[:, i-1, :] for i > 0
+                logits_shifted = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+            else:
+                logits_shifted = logits
+
+            if needs_squeeze:
+                logits_shifted = logits_shifted.squeeze(
+                    0
+                )  # Back to (num_tokens, vocab_size)
 
             # Debug: check if predictions are diverse at mask positions
             if logits.shape[0] > 1 and num_remaining_masks > 0:
@@ -286,7 +295,8 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
                 torch.tensor(-float("inf"), device=x_pred_probs.device),
             )
 
-            # Fill masks based on confidence threshold
+            # Fill masks based on confidence threshold (matching official implementation)
+            # Official: unmask_idx = (x1_p > threshold) & mask_idx, with at least one filled
             if self.confidence_threshold > 0:
                 # Only fill high-confidence masks
                 transfer_index = (confidence > self.confidence_threshold) & mask_index
@@ -294,9 +304,10 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
 
                 if num_to_fill == 0:
                     # If no high-confidence tokens, fill at least one (highest probability)
-                    _, select_idx = torch.topk(confidence, k=1)
+                    # Official: max_prob_idx = x1_p.argmax(dim=-1)
+                    max_prob_idx = confidence.argmax()
                     transfer_index = torch.zeros_like(mask_index, dtype=torch.bool)
-                    transfer_index[select_idx] = True
+                    transfer_index[max_prob_idx] = True
                     num_to_fill = 1
                     logger.info(
                         f"[Fast_dLLM] Iter {iteration}: No high-confidence tokens, fill top-1"
@@ -307,24 +318,13 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
                         f"(threshold={self.confidence_threshold})"
                     )
             else:
-                # When threshold=0.0, we should still fill iteratively for better quality
-                # Fill masks progressively to allow model to use filled context
-                # Strategy: fill a portion of masks each iteration (e.g., 25% or at least 1)
-                fill_ratio = 0.25  # Fill 25% of remaining masks per iteration
-                min_fill = 1  # At least fill 1 mask per iteration
-                max_fill = max(min_fill, int(num_remaining_masks * fill_ratio))
-
-                # Select top-k masks by confidence
-                _, top_indices = torch.topk(
-                    confidence, k=min(max_fill, num_remaining_masks)
-                )
-                transfer_index = torch.zeros_like(mask_index, dtype=torch.bool)
-                transfer_index[top_indices] = True
+                # When threshold=0.0, fill all masks (greedy decoding)
+                # Official implementation fills all masks when threshold is low
+                transfer_index = mask_index.clone()
                 num_to_fill = torch.sum(transfer_index).item()
-
                 logger.info(
-                    f"[Fast_dLLM] Iter {iteration}: Fill {num_to_fill} masks "
-                    f"(threshold=0.0, progressive: {fill_ratio*100:.0f}% per iter)"
+                    f"[Fast_dLLM] Iter {iteration}: Fill all {num_to_fill} masks "
+                    f"(threshold=0.0, greedy)"
                 )
 
             # Update input_ids
