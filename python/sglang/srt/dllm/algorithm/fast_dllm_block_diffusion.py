@@ -219,14 +219,34 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
                 f"input_ids[:10]={input_ids[:min(10, len(input_ids))].tolist()}"
             )
 
-            # Forward pass
-            logits_output, can_run_cuda_graph = model_runner.forward(
-                forward_batch, pp_proxy_tensors=None
+            # Forward pass: Directly call model forward to bypass SGLang's standard attention
+            # Fast_dLLM needs block-causal attention, which conflicts with SGLang's standard causal attention
+            model = model_runner.model
+            positions = forward_batch.positions
+
+            # Call model forward directly (bypasses ModelRunner's attention backend initialization)
+            # This allows Fast_dLLM's own attention mechanism (block-causal) to work
+            hidden_states = model.model(
+                input_ids,
+                positions,
+                forward_batch,
+                input_embeds=None,
+                pp_proxy_tensors=None,
+            )
+
+            # Process logits manually using the model's logits processor
+            logits_output = model.logits_processor(
+                input_ids,
+                hidden_states,
+                model.lm_head,
+                forward_batch,
+                aux_hidden_states=None,
             )
 
             # Get full sequence logits
             # logits[i] = prediction for next token after input_ids[i]
             logits = logits_output.full_logits  # Shape: (num_tokens, vocab_size)
+            can_run_cuda_graph = False  # Disable CUDA graph for dLLM
 
             logger.debug(f"[Fast_dLLM] Iter {iteration}: logits shape={logits.shape}")
 
@@ -336,10 +356,26 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
                 f"{input_ids[:min(10, len(input_ids))].tolist()}"
             )
 
-        # Final forward pass
-        logits_output, can_run_cuda_graph = model_runner.forward(
-            forward_batch, pp_proxy_tensors=None
+        # Final forward pass: Directly call model forward
+        model = model_runner.model
+        positions = forward_batch.positions
+
+        hidden_states = model.model(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds=None,
+            pp_proxy_tensors=None,
         )
+
+        logits_output = model.logits_processor(
+            input_ids,
+            hidden_states,
+            model.lm_head,
+            forward_batch,
+            aux_hidden_states=None,
+        )
+        can_run_cuda_graph = False
 
         # Extract generated tokens (everything after prompt)
         next_token_ids = input_ids[start:]
