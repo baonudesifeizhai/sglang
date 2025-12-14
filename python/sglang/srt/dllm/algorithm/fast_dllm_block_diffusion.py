@@ -179,45 +179,44 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
         """
         Run Fast_dLLM block diffusion algorithm.
 
-        Fast_dLLM v2 推理流程：
-        1. 初始化：prompt + mask tokens
-        2. 迭代解码：
-           - Forward pass 得到 logits
-           - 应用 token shift（Fast_dLLM 核心特性）
-           - Top-p 采样
-           - 根据置信度填充 mask
-        3. 返回生成的 tokens
+        Process:
+        1. Initialize: prompt + mask tokens
+        2. Iterative decoding:
+           - Forward pass to get logits
+           - Apply token shift (Fast_dLLM core feature)
+           - Sample with top-p
+           - Fill masks based on confidence
+        3. Return generated tokens
 
-        关键理解：
-        - logits[i] 对应 input_ids[i] 位置的下一个 token 的预测
-        - token shift: logits_shifted[i] = logits[i-1] (i>0), logits_shifted[0] = logits[0]
-        - 这样可以在 block 内保持自回归特性
+        Key understanding:
+        - logits[i] represents the prediction for the next token after input_ids[i]
+        - For mask position i, we need logits[i-1] to predict input_ids[i]
+        - Token shift: logits_shifted[i] = logits[i-1] for i > 0, logits_shifted[0] = logits[0]
         """
-        # Step 1: 识别 prompt 和 mask 位置
+        # Step 1: Identify prompt and mask positions
         input_ids = forward_batch.input_ids
         mask_index = input_ids == self.mask_id
         num_masks = torch.sum(mask_index).item()
         start = len(input_ids) - num_masks
 
         logger.info(
-            f"[Fast_dLLM] 初始化: seq_len={len(input_ids)}, "
-            f"prompt_len={start}, mask_count={num_masks}, "
-            f"mask_id={self.mask_id}"
+            f"[Fast_dLLM] Init: seq_len={len(input_ids)}, "
+            f"prompt_len={start}, mask_count={num_masks}, mask_id={self.mask_id}"
         )
 
-        # Step 2: 迭代 block diffusion
+        # Step 2: Iterative block diffusion
         for iteration in range(self.max_iterations):
-            # 检查是否所有 mask 都已填充
+            # Check if all masks are filled
             mask_index = input_ids == self.mask_id
             num_remaining_masks = torch.sum(mask_index).item()
 
             if num_remaining_masks == 0:
-                logger.info(f"[Fast_dLLM] 迭代 {iteration}: 所有 mask 已填充，退出")
+                logger.info(f"[Fast_dLLM] Iter {iteration}: All masks filled, exit")
                 break
 
             logger.info(
-                f"[Fast_dLLM] 迭代 {iteration}: 剩余 mask={num_remaining_masks}, "
-                f"input_ids前10个={input_ids[:min(10, len(input_ids))].tolist()}"
+                f"[Fast_dLLM] Iter {iteration}: remaining_masks={num_remaining_masks}, "
+                f"input_ids[:10]={input_ids[:min(10, len(input_ids))].tolist()}"
             )
 
             # Forward pass
@@ -225,37 +224,48 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
                 forward_batch, pp_proxy_tensors=None
             )
 
-            # 获取完整序列的 logits
+            # Get full sequence logits
+            # logits[i] = prediction for next token after input_ids[i]
             logits = logits_output.full_logits  # Shape: (num_tokens, vocab_size)
-            logger.debug(
-                f"[Fast_dLLM] 迭代 {iteration}: logits shape={logits.shape}, "
-                f"logits[0]前5个值={logits[0][:5].tolist() if len(logits) > 0 else []}"
-            )
 
-            # 应用 token shift（Fast_dLLM 核心）
-            # logits_shifted[i] = logits[i-1] for i > 0, logits_shifted[0] = logits[0]
-            # 这样可以在 block 内保持自回归特性
+            logger.debug(f"[Fast_dLLM] Iter {iteration}: logits shape={logits.shape}")
+
+            # Apply token shift (Fast_dLLM core)
+            # logits[i] represents prediction for next token after input_ids[i]
+            # For mask position i, we need logits[i-1] to predict input_ids[i]
+            # Token shift: logits_shifted[i] = logits[i-1] for i > 0, logits_shifted[0] = logits[0]
             if logits.shape[0] > 1:
+                # Shift: [logits[0], logits[0], logits[1], ..., logits[n-2]]
+                # This makes logits_shifted[i] represent prediction for input_ids[i]
                 logits_shifted = torch.cat([logits[:1], logits[:-1]], dim=0)
             else:
                 logits_shifted = logits
 
-            # Top-p 采样
+            # Debug: check if logits are all the same (indicates model can't distinguish)
+            if logits.shape[0] > 1:
+                first_logit_max = logits[0].argmax().item()
+                second_logit_max = logits[1].argmax().item()
+                logger.debug(
+                    f"[Fast_dLLM] Iter {iteration}: logits[0].argmax()={first_logit_max}, "
+                    f"logits[1].argmax()={second_logit_max}"
+                )
+
+            # Sample with top-p
             x_pred, probs = self._sample_with_top_p(
                 logits_shifted, top_p=self.top_p, temperature=self.temperature
             )
 
-            # 计算置信度（预测 token 的概率）
+            # Calculate confidence (probability of predicted token)
             x_pred_probs = torch.gather(
                 probs, dim=-1, index=x_pred.unsqueeze(-1)
             ).squeeze(-1)
 
             logger.debug(
-                f"[Fast_dLLM] 迭代 {iteration}: 预测前5个token={x_pred[:min(5, len(x_pred))].tolist()}, "
-                f"对应概率={x_pred_probs[:min(5, len(x_pred_probs))].tolist()}"
+                f"[Fast_dLLM] Iter {iteration}: pred_tokens[:5]={x_pred[:min(5, len(x_pred))].tolist()}, "
+                f"probs[:5]={x_pred_probs[:min(5, len(x_pred_probs))].tolist()}"
             )
 
-            # 只在 mask 位置更新，非 mask 位置保持原样
+            # Only update mask positions, keep non-mask positions unchanged
             x_final = torch.where(mask_index, x_pred, input_ids)
             confidence = torch.where(
                 mask_index,
@@ -263,55 +273,67 @@ class FastDLLMBlockDiffusion(DllmAlgorithm):
                 torch.tensor(-float("inf"), device=x_pred_probs.device),
             )
 
-            # 根据置信度阈值填充 mask
+            # Fill masks based on confidence threshold
             if self.confidence_threshold > 0:
-                # 只填充高置信度的 mask
+                # Only fill high-confidence masks
                 transfer_index = (confidence > self.confidence_threshold) & mask_index
                 num_to_fill = torch.sum(transfer_index).item()
 
                 if num_to_fill == 0:
-                    # 如果没有高置信度的，至少填充一个（概率最高的）
+                    # If no high-confidence tokens, fill at least one (highest probability)
                     _, select_idx = torch.topk(confidence, k=1)
                     transfer_index = torch.zeros_like(mask_index, dtype=torch.bool)
                     transfer_index[select_idx] = True
                     num_to_fill = 1
                     logger.info(
-                        f"[Fast_dLLM] 迭代 {iteration}: 无高置信度token，填充最高概率的1个"
+                        f"[Fast_dLLM] Iter {iteration}: No high-confidence tokens, fill top-1"
                     )
                 else:
                     logger.info(
-                        f"[Fast_dLLM] 迭代 {iteration}: 填充 {num_to_fill} 个高置信度token "
+                        f"[Fast_dLLM] Iter {iteration}: Fill {num_to_fill} high-confidence tokens "
                         f"(threshold={self.confidence_threshold})"
                     )
             else:
-                # 填充所有 mask（贪婪解码）
-                transfer_index = mask_index.clone()
-                num_to_fill = torch.sum(transfer_index).item()
-                logger.info(
-                    f"[Fast_dLLM] 迭代 {iteration}: 填充所有 {num_to_fill} 个mask "
-                    f"(threshold=0.0, 贪婪解码)"
-                )
+                # When threshold=0.0, we should still fill iteratively for better quality
+                # Fill at least one mask per iteration (highest confidence)
+                if iteration == 0 and num_remaining_masks == len(input_ids):
+                    # Special case: all positions are mask (no prompt)
+                    # Fill only the first mask to provide context for next iteration
+                    transfer_index = torch.zeros_like(mask_index, dtype=torch.bool)
+                    transfer_index[0] = True
+                    num_to_fill = 1
+                    logger.info(
+                        f"[Fast_dLLM] Iter {iteration}: All masks, fill first one only"
+                    )
+                else:
+                    # Fill all masks (greedy decoding)
+                    transfer_index = mask_index.clone()
+                    num_to_fill = torch.sum(transfer_index).item()
+                    logger.info(
+                        f"[Fast_dLLM] Iter {iteration}: Fill all {num_to_fill} masks "
+                        f"(threshold=0.0, greedy)"
+                    )
 
-            # 更新 input_ids
+            # Update input_ids
             input_ids[transfer_index] = x_final[transfer_index]
             forward_batch.input_ids = input_ids
 
             logger.info(
-                f"[Fast_dLLM] 迭代 {iteration}: 更新后 input_ids前10个="
+                f"[Fast_dLLM] Iter {iteration}: Updated input_ids[:10]="
                 f"{input_ids[:min(10, len(input_ids))].tolist()}"
             )
 
-        # 最终 forward pass
+        # Final forward pass
         logits_output, can_run_cuda_graph = model_runner.forward(
             forward_batch, pp_proxy_tensors=None
         )
 
-        # 提取生成的 tokens（prompt 之后的所有内容）
+        # Extract generated tokens (everything after prompt)
         next_token_ids = input_ids[start:]
 
         logger.info(
-            f"[Fast_dLLM] 完成: 生成 {len(next_token_ids)} 个tokens, "
-            f"前10个={next_token_ids[:min(10, len(next_token_ids))].tolist()}"
+            f"[Fast_dLLM] Done: Generated {len(next_token_ids)} tokens, "
+            f"first_10={next_token_ids[:min(10, len(next_token_ids))].tolist()}"
         )
 
         return logits_output, next_token_ids, can_run_cuda_graph
