@@ -270,22 +270,37 @@ class TransformersForCausalLM(nn.Module):
         # Use return_dict=True to avoid calling to_tuple() on custom output classes
         # that don't implement it (e.g., GuardLogitsOutputWithPast).
         # Try multiple ways to extract hidden_states to handle different output formats.
-        if hasattr(model_output, "last_hidden_state"):
+        hidden_states = None
+        if (
+            hasattr(model_output, "last_hidden_state")
+            and model_output.last_hidden_state is not None
+        ):
             hidden_states = model_output.last_hidden_state
-        elif hasattr(model_output, "hidden_states"):
+        elif (
+            hasattr(model_output, "hidden_states")
+            and model_output.hidden_states is not None
+        ):
             # Some custom output classes use 'hidden_states' instead of 'last_hidden_state'
             hidden_states = model_output.hidden_states
             # If it's a tuple/list, get the last one
             if isinstance(hidden_states, (tuple, list)) and len(hidden_states) > 0:
                 hidden_states = hidden_states[-1]
         elif hasattr(model_output, "__getitem__"):
-            # Fallback to tuple-like access for custom output classes
-            hidden_states = model_output[0]
-        else:
-            # Last resort: try to access common attributes
+            try:
+                # Fallback to tuple-like access for custom output classes
+                hidden_states = model_output[0]
+            except (TypeError, KeyError):
+                pass
+
+        if hidden_states is None:
+            # Last resort: print available attributes for debugging
+            available_attrs = [
+                attr for attr in dir(model_output) if not attr.startswith("_")
+            ]
             raise AttributeError(
                 f"Cannot extract hidden_states from {type(model_output)}. "
-                f"Available attributes: {[attr for attr in dir(model_output) if not attr.startswith('_')]}"
+                f"Available attributes: {available_attrs}. "
+                f"Try inspecting the object to find the correct attribute name."
             )
         hidden_states = hidden_states[0, ...]
 
