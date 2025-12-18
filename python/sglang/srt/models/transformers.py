@@ -269,16 +269,10 @@ class TransformersForCausalLM(nn.Module):
             output_hidden_states=True,  # Required for GuardLogitsOutputWithPast
         )
         # Extract hidden_states: prefer last_hidden_state, fallback to hidden_states tuple
-        hidden_states = getattr(model_output, "last_hidden_state", None)
-        if hidden_states is None:
-            hidden_states_tuple = getattr(model_output, "hidden_states", None)
-            if hidden_states_tuple is not None:
-                hidden_states = hidden_states_tuple[-1]  # Get last layer from tuple
-            else:
-                raise AttributeError(
-                    f"Cannot extract hidden_states from {type(model_output)}. "
-                    f"Available attributes: {[attr for attr in dir(model_output) if not attr.startswith('_')]}"
-                )
+        hidden_states = (
+            getattr(model_output, "last_hidden_state", None)
+            or model_output.hidden_states[-1]
+        )
         hidden_states = hidden_states[0, ...]  # Remove batch dimension
 
         return self.logits_processor(
