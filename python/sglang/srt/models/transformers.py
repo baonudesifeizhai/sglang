@@ -259,16 +259,17 @@ class TransformersForCausalLM(nn.Module):
     ) -> LogitsProcessorOutput:
         assert get_embedding is False, "embedding is not supported yet"
         aux_hidden_states = None
-        hidden_states = self.model(
+        model_output = self.model(
             input_ids[None, ...],
             use_cache=False,
             position_ids=positions[None, ...],
             forward_batch=forward_batch,
             attention_instances=self.attention_instances,
-            return_dict=False,
-        )[0][
-            0, ...
-        ]  # we remove batch dimension for now
+            return_dict=True,
+        )
+        # Use return_dict=True to avoid calling to_tuple() on custom output classes
+        # that don't implement it (e.g., GuardLogitsOutputWithPast)
+        hidden_states = model_output.last_hidden_state[0, ...]
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
