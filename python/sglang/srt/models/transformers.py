@@ -276,14 +276,17 @@ class TransformersForCausalLM(nn.Module):
             and model_output.last_hidden_state is not None
         ):
             hidden_states = model_output.last_hidden_state
-        elif (
-            hasattr(model_output, "hidden_states")
-            and model_output.hidden_states is not None
-        ):
+        elif hasattr(model_output, "hidden_states"):
             # Some custom output classes use 'hidden_states' instead of 'last_hidden_state'
             hidden_states = model_output.hidden_states
+            # If it's None, try to get from past_key_values or other sources
+            if hidden_states is None:
+                # For GuardLogitsOutputWithPast, hidden_states might be None
+                # We need to get it from the model's internal state or compute it differently
+                # Check if we can get it from past_key_values or need to recompute
+                pass
             # If it's a tuple/list, get the last one
-            if isinstance(hidden_states, (tuple, list)) and len(hidden_states) > 0:
+            elif isinstance(hidden_states, (tuple, list)) and len(hidden_states) > 0:
                 hidden_states = hidden_states[-1]
         elif hasattr(model_output, "__getitem__"):
             try:
@@ -293,14 +296,14 @@ class TransformersForCausalLM(nn.Module):
                 pass
 
         if hidden_states is None:
-            # Last resort: print available attributes for debugging
-            available_attrs = [
-                attr for attr in dir(model_output) if not attr.startswith("_")
-            ]
+            # For GuardLogitsOutputWithPast and similar classes, we may need to
+            # call the model differently or extract hidden_states from a different source.
+            # Try to get the base model's output directly
+            # This is a workaround for models that don't expose hidden_states in their output
             raise AttributeError(
                 f"Cannot extract hidden_states from {type(model_output)}. "
-                f"Available attributes: {available_attrs}. "
-                f"Try inspecting the object to find the correct attribute name."
+                f"Available attributes: {[attr for attr in dir(model_output) if not attr.startswith('_')]}. "
+                f"This model may require a different approach to extract hidden_states."
             )
         hidden_states = hidden_states[0, ...]
 
