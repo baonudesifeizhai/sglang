@@ -268,8 +268,14 @@ class TransformersForCausalLM(nn.Module):
             return_dict=True,
         )
         # Use return_dict=True to avoid calling to_tuple() on custom output classes
-        # that don't implement it (e.g., GuardLogitsOutputWithPast)
-        hidden_states = model_output.last_hidden_state[0, ...]
+        # that don't implement it (e.g., GuardLogitsOutputWithPast).
+        # Try to extract hidden_states: first try attribute access, then fallback to index access.
+        if hasattr(model_output, "last_hidden_state"):
+            hidden_states = model_output.last_hidden_state
+        else:
+            # Fallback to tuple-like access for custom output classes
+            hidden_states = model_output[0]
+        hidden_states = hidden_states[0, ...]
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
