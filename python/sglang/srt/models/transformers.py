@@ -268,23 +268,17 @@ class TransformersForCausalLM(nn.Module):
             return_dict=True,  # Avoid calling to_tuple() on custom output classes
             output_hidden_states=True,  # Required for GuardLogitsOutputWithPast
         )
-        # GuardLogitsOutputWithPast.hidden_states is Optional[Tuple[torch.FloatTensor, ...]]
-        # Get the last element from the tuple (final layer's hidden states)
-        if (
-            hasattr(model_output, "last_hidden_state")
-            and model_output.last_hidden_state is not None
-        ):
-            hidden_states = model_output.last_hidden_state
-        elif (
-            hasattr(model_output, "hidden_states")
-            and model_output.hidden_states is not None
-        ):
-            hidden_states = model_output.hidden_states[-1]  # Get last layer from tuple
-        else:
-            raise AttributeError(
-                f"Cannot extract hidden_states from {type(model_output)}. "
-                f"Available attributes: {[attr for attr in dir(model_output) if not attr.startswith('_')]}"
-            )
+        # Extract hidden_states: prefer last_hidden_state, fallback to hidden_states tuple
+        hidden_states = getattr(model_output, "last_hidden_state", None)
+        if hidden_states is None:
+            hidden_states_tuple = getattr(model_output, "hidden_states", None)
+            if hidden_states_tuple is not None:
+                hidden_states = hidden_states_tuple[-1]  # Get last layer from tuple
+            else:
+                raise AttributeError(
+                    f"Cannot extract hidden_states from {type(model_output)}. "
+                    f"Available attributes: {[attr for attr in dir(model_output) if not attr.startswith('_')]}"
+                )
         hidden_states = hidden_states[0, ...]  # Remove batch dimension
 
         return self.logits_processor(
