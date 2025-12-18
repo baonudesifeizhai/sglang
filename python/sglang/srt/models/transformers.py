@@ -259,16 +259,33 @@ class TransformersForCausalLM(nn.Module):
     ) -> LogitsProcessorOutput:
         assert get_embedding is False, "embedding is not supported yet"
         aux_hidden_states = None
-        hidden_states = self.model(
+        model_output = self.model(
             input_ids[None, ...],
             use_cache=False,
             position_ids=positions[None, ...],
             forward_batch=forward_batch,
             attention_instances=self.attention_instances,
-            return_dict=False,
-        )[0][
-            0, ...
-        ]  # we remove batch dimension for now
+            return_dict=True,  # Avoid calling to_tuple() on custom output classes
+            output_hidden_states=True,  # Required for GuardLogitsOutputWithPast
+        )
+        # GuardLogitsOutputWithPast.hidden_states is Optional[Tuple[torch.FloatTensor, ...]]
+        # Get the last element from the tuple (final layer's hidden states)
+        if (
+            hasattr(model_output, "last_hidden_state")
+            and model_output.last_hidden_state is not None
+        ):
+            hidden_states = model_output.last_hidden_state
+        elif (
+            hasattr(model_output, "hidden_states")
+            and model_output.hidden_states is not None
+        ):
+            hidden_states = model_output.hidden_states[-1]  # Get last layer from tuple
+        else:
+            raise AttributeError(
+                f"Cannot extract hidden_states from {type(model_output)}. "
+                f"Available attributes: {[attr for attr in dir(model_output) if not attr.startswith('_')]}"
+            )
+        hidden_states = hidden_states[0, ...]  # Remove batch dimension
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
