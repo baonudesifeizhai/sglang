@@ -445,22 +445,6 @@ class LlamaForCausalLM(nn.Module):
             self.lm_head = PPMissingLayer()
             self.logits_processor = None
 
-        # Perform weight tying for PP when tie_word_embeddings=True
-        # In PP mode, embed_tokens only exists on first rank, so we need to copy
-        # its weight to lm_head on last rank
-        if self.pp_group.world_size > 1 and self.config.tie_word_embeddings:
-            if self.pp_group.is_first_rank:
-                self.pp_group.send(
-                    self.model.embed_tokens.weight, dst=self.pp_group.last_rank
-                )
-            elif self.pp_group.is_last_rank:
-                emb_token_weight = self.pp_group.recv(
-                    size=(config.vocab_size, config.hidden_size),
-                    dtype=next(self.model.parameters()).dtype,
-                    src=self.pp_group.first_rank,
-                )
-                self.lm_head.weight.copy_(emb_token_weight)
-
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
         self.stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -657,6 +641,31 @@ class LlamaForCausalLM(nn.Module):
                     weight_loader(param, loaded_weight)
                 else:
                     logger.warning(f"Parameter {name} not found in params_dict")
+
+        # Perform weight tying for PP when tie_word_embeddings=True
+        # After all weights are loaded, copy embed_tokens.weight to lm_head.weight
+        # In PP mode, embed_tokens only exists on first rank, so we need to send/recv
+        if (
+            self.pp_group.world_size > 1
+            and self.config.tie_word_embeddings
+            and self.pp_group.is_first_rank
+        ):
+            # Send embed_tokens.weight from first rank to last rank
+            self.pp_group.send(
+                self.model.embed_tokens.weight, dst=self.pp_group.last_rank
+            )
+        elif (
+            self.pp_group.world_size > 1
+            and self.config.tie_word_embeddings
+            and self.pp_group.is_last_rank
+        ):
+            # Receive embed_tokens.weight on last rank and copy to lm_head.weight
+            emb_token_weight = self.pp_group.recv(
+                size=(self.config.vocab_size, self.config.hidden_size),
+                dtype=next(self.model.parameters()).dtype,
+                src=self.pp_group.first_rank,
+            )
+            self.lm_head.weight.copy_(emb_token_weight)
 
     def get_weights_by_name(
         self, name: str, truncate_size: int = 100, tp_size: int = 1
