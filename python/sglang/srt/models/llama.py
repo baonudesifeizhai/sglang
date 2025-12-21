@@ -427,7 +427,9 @@ class LlamaForCausalLM(nn.Module):
         # Llama 3.1 8B Instruct set tie_word_embeddings to False
         # Handle lm_head on different pp ranks
         if self.pp_group.is_last_rank:
-            if self.config.tie_word_embeddings:
+            # Only use embed_tokens as lm_head when world_size == 1 (no PP)
+            # In PP mode, embed_tokens only exists on first rank, so we need separate lm_head
+            if self.pp_group.world_size == 1 and self.config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
                 self.lm_head = ParallelLMHead(
@@ -442,6 +444,23 @@ class LlamaForCausalLM(nn.Module):
             # Ranks other than the last rank will have a placeholder layer
             self.lm_head = PPMissingLayer()
             self.logits_processor = None
+
+        # Perform weight tying for PP when tie_word_embeddings=True
+        # In PP mode, embed_tokens only exists on first rank, so we need to copy
+        # its weight to lm_head on last rank
+        if self.pp_group.world_size > 1 and self.config.tie_word_embeddings:
+            if self.pp_group.is_first_rank:
+                self.pp_group.send(
+                    self.model.embed_tokens.weight, dst=self.pp_group.last_rank
+                )
+            elif self.pp_group.is_last_rank:
+                emb_token_weight = self.pp_group.recv(
+                    size=(config.vocab_size, config.hidden_size),
+                    dtype=next(self.model.parameters()).dtype,
+                    src=self.pp_group.first_rank,
+                )
+                self.lm_head.weight.copy_(emb_token_weight)
+
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
         self.stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
