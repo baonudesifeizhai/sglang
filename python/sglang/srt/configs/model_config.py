@@ -860,14 +860,21 @@ class ModelConfig:
         tf_version = version.parse(tf_version_str)
         required_version = version.parse("5.0.0")
 
-        if tf_version < required_version:
+        # Check base version (major.minor.micro) for dev/rc versions
+        # e.g., 5.0.0.dev0 and 5.0.0rc0 should be accepted when requiring >= 5.0.0
+        tf_base_version = version.parse(
+            f"{tf_version.major}.{tf_version.minor}.{tf_version.micro}"
+        )
+        version_satisfied = tf_base_version >= required_version
+
+        if not version_satisfied:
             if needs_tf_v5:
                 raise ValueError(
                     f"Transformers version {tf_version_str} is not supported for model {self.model_path} "
                     f"or model type {self.hf_config.model_type}. "
                     "Please upgrade transformers to >= 5.0.0."
                 )
-        elif not needs_tf_v5:
+        elif version_satisfied and not needs_tf_v5:
             logger.warning(
                 f"Transformers version {tf_version_str} is used for model type {self.hf_config.model_type}. "
                 "If you experience issues related to RoPE parameters, "
