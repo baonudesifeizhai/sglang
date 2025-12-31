@@ -476,11 +476,25 @@ class TpModelWorker(BaseTpWorker):
                 batch_result.delay_sample_func = sample_batch_func
                 return batch_result
 
+            # Debug logging for disaggregation prefill mode
+            if self.server_args.disaggregation_mode == "prefill":
+                logger.warning(
+                    f"[DEBUG] PP{self.pp_group.rank_in_group} TP{self.tp_rank}: "
+                    f"disaggregation_mode=prefill, is_prefill_only={model_worker_batch.is_prefill_only}, "
+                    f"will_sample={not model_worker_batch.is_prefill_only}"
+                )
+
             if not model_worker_batch.is_prefill_only:
                 # For normal requests, sample the next token ids.
                 batch_result.next_token_ids = self.model_runner.sample(
                     logits_output, forward_batch
                 )
+                # Debug logging after sampling
+                if self.server_args.disaggregation_mode == "prefill":
+                    logger.warning(
+                        f"[DEBUG] PP{self.pp_group.rank_in_group} TP{self.tp_rank}: "
+                        f"Sampled next_token_ids={batch_result.next_token_ids.tolist()}"
+                    )
             else:
                 # For prefill-only requests, create dummy token IDs on CPU
                 # The size should match the batch size (number of sequences), not total tokens
@@ -489,6 +503,11 @@ class TpModelWorker(BaseTpWorker):
                     dtype=torch.long,
                     device=model_worker_batch.input_ids.device,
                 )
+                if self.server_args.disaggregation_mode == "prefill":
+                    logger.warning(
+                        f"[DEBUG] PP{self.pp_group.rank_in_group} TP{self.tp_rank}: "
+                        f"Created dummy next_token_ids={batch_result.next_token_ids.tolist()}"
+                    )
                 if (
                     model_worker_batch.return_logprob
                     and logits_output.next_token_logits is not None
