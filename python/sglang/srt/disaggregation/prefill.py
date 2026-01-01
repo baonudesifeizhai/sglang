@@ -446,8 +446,10 @@ class SchedulerDisaggregationPrefillMixin:
                 if req.time_stats.prefill_finished_ts == 0.0:
                     req.time_stats.prefill_finished_ts = time.time()
 
-                # There is no output_ids for prefill
-                req.output_ids.append(next_token_id)
+                # In disaggregation prefill mode, prefill server should not add dummy token IDs to output_ids
+                # The dummy token ID is only for interface compatibility, not for actual output
+                # The actual token generation will be done on the decode server
+                # Do not append next_token_id to req.output_ids in disaggregation prefill mode
                 self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
                 req.add_latency(RequestStage.PREFILL_FORWARD)
                 trace_slice(RequestStage.PREFILL_FORWARD, req.rid, auto_next_anon=True)
