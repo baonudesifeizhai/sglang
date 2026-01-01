@@ -483,6 +483,20 @@ class TpModelWorker(BaseTpWorker):
                     f"is_prefill_only={model_worker_batch.is_prefill_only}, "
                     f"will_sample={not model_worker_batch.is_prefill_only}"
                 )
+                # In disaggregation prefill mode, prefill server should not sample tokens
+                # It should only compute KV cache and return dummy token IDs
+                # The actual token generation will be done on the decode server
+                batch_result.next_token_ids = torch.zeros(
+                    len(model_worker_batch.seq_lens),
+                    dtype=torch.long,
+                    device=model_worker_batch.input_ids.device,
+                )
+                if self.server_args.disaggregation_mode == "prefill":
+                    logger.warning(
+                        f"[DEBUG] PP{self.pp_group.rank_in_group} TP{self.tp_rank}: "
+                        f"Created dummy next_token_ids (disaggregation prefill mode)={batch_result.next_token_ids.tolist()}"
+                    )
+                return batch_result
 
             if not model_worker_batch.is_prefill_only:
                 # For normal requests, sample the next token ids.

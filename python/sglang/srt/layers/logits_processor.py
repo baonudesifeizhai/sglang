@@ -395,6 +395,21 @@ class LogitsProcessor(nn.Module):
                 f"[DEBUG] LogitsProcessor.forward: PP{pp_group.rank_in_group}: "
                 f"is_prefill_only={logits_metadata.is_prefill_only}"
             )
+            # In disaggregation prefill mode, prefill server should not generate logits
+            # It should only compute KV cache and return dummy logits
+            # The actual logits generation will be done on the decode server
+            batch_size = hidden_states.shape[0]
+            vocab_size = self.config.vocab_size
+            dummy_logits = torch.zeros(
+                (batch_size, vocab_size),
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            return LogitsProcessorOutput(
+                next_token_logits=dummy_logits,
+                full_logits=None,
+                hidden_states=hidden_states,
+            )
 
         # Check if multi-item scoring is enabled via server args (only for prefill-only requests)
         multi_item_delimiter = get_global_server_args().multi_item_scoring_delimiter
