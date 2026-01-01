@@ -389,16 +389,10 @@ class LogitsProcessor(nn.Module):
         server_args = get_global_server_args()
         if server_args.disaggregation_mode == "prefill":
             from sglang.srt.distributed import get_pp_group
-            from sglang.srt.layers.utils import PPMissingLayer
 
             pp_group = get_pp_group()
             logger.warning(
                 f"[DEBUG] LogitsProcessor.forward: PP{pp_group.rank_in_group}: "
-                f"lm_head_type={type(lm_head).__name__}, "
-                f"is_PPMissingLayer={isinstance(lm_head, PPMissingLayer)}, "
-                f"has_weight={hasattr(lm_head, 'weight')}, "
-                f"has_quant_method={hasattr(lm_head, 'quant_method')}, "
-                f"forward_mode={logits_metadata.forward_mode}, "
                 f"is_prefill_only={logits_metadata.is_prefill_only}"
             )
 
@@ -890,17 +884,8 @@ class LogitsProcessor(nn.Module):
         pp_group = None
         if server_args.disaggregation_mode == "prefill":
             from sglang.srt.distributed import get_pp_group
-            from sglang.srt.layers.utils import PPMissingLayer
 
             pp_group = get_pp_group()
-            logger.warning(
-                f"[DEBUG] _get_logits: PP{pp_group.rank_in_group}: "
-                f"lm_head_type={type(lm_head).__name__}, "
-                f"has_weight={hasattr(lm_head, 'weight')}, "
-                f"has_quant_method={hasattr(lm_head, 'quant_method')}, "
-                f"is_PPMissingLayer={isinstance(lm_head, PPMissingLayer)}, "
-                f"has_set_lora={hasattr(lm_head, 'set_lora')}"
-            )
 
         if self.do_tensor_parallel_all_gather_dp_attn:
             logits_metadata.compute_dp_attention_metadata()
@@ -912,15 +897,15 @@ class LogitsProcessor(nn.Module):
 
         if hasattr(lm_head, "set_lora") and hasattr(lm_head, "apply_lora"):
             # This is a LoRA-wrapped module, use its forward method
-            if server_args.disaggregation_mode == "prefill" and pp_group is not None:
-                logger.warning(
-                    f"[DEBUG] _get_logits: PP{pp_group.rank_in_group}: Using LoRA path"
-                )
             logits = lm_head(hidden_states)
         elif hasattr(lm_head, "weight"):
             if server_args.disaggregation_mode == "prefill" and pp_group is not None:
                 logger.warning(
-                    f"[DEBUG] _get_logits: PP{pp_group.rank_in_group}: Using weight path"
+                    f"[DEBUG] _get_logits (before matmul): PP{pp_group.rank_in_group}: "
+                    f"hidden_states shape={hidden_states.shape}, "
+                    f"hidden_states min={hidden_states.min().item():.4f}, max={hidden_states.max().item():.4f}, "
+                    f"lm_head.weight shape={lm_head.weight.shape}, "
+                    f"lm_head.weight min={lm_head.weight.min().item():.4f}, max={lm_head.weight.max().item():.4f}"
                 )
             if self.use_fp32_lm_head:
                 logits = torch.matmul(
@@ -942,6 +927,14 @@ class LogitsProcessor(nn.Module):
                 logits = torch.matmul(
                     hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
                 )
+            # Debug logging after computing logits
+            if server_args.disaggregation_mode == "prefill" and pp_group is not None:
+                logger.warning(
+                    f"[DEBUG] _get_logits (after matmul): PP{pp_group.rank_in_group}: "
+                    f"logits shape={logits.shape}, "
+                    f"logits min={logits.min().item():.4f}, max={logits.max().item():.4f}, "
+                    f"mean={logits.mean().item():.4f}, is_all_zero={torch.all(logits == 0).item()}"
+                )
         else:
             # GGUF models or PPMissingLayer
             if server_args.disaggregation_mode == "prefill" and pp_group is not None:
@@ -951,10 +944,6 @@ class LogitsProcessor(nn.Module):
                     logger.error(
                         f"[DEBUG] _get_logits: PP{pp_group.rank_in_group}: "
                         f"ERROR: PPMissingLayer detected! This should not happen in disaggregation prefill mode."
-                    )
-                else:
-                    logger.warning(
-                        f"[DEBUG] _get_logits: PP{pp_group.rank_in_group}: Using quant_method path (GGUF)"
                     )
             # TODO: use weight_packed_linear for GGUF models
             if self.use_fp32_lm_head:
@@ -969,6 +958,16 @@ class LogitsProcessor(nn.Module):
 
         if self.logit_scale is not None:
             logits.mul_(self.logit_scale)
+
+        # Debug logging before all_gather
+        if server_args.disaggregation_mode == "prefill" and pp_group is not None:
+            logger.warning(
+                f"[DEBUG] _get_logits (before all_gather): PP{pp_group.rank_in_group}: "
+                f"logits shape={logits.shape}, "
+                f"logits min={logits.min().item():.4f}, max={logits.max().item():.4f}, "
+                f"mean={logits.mean().item():.4f}, is_all_zero={torch.all(logits == 0).item()}, "
+                f"do_tensor_parallel_all_gather={self.do_tensor_parallel_all_gather}"
+            )
 
         if self.do_tensor_parallel_all_gather:
             if self.use_attn_tp_group:
@@ -1000,6 +999,14 @@ class LogitsProcessor(nn.Module):
                 logits = global_logits
             else:
                 logits = tensor_model_parallel_all_gather(logits)
+            # Debug logging after all_gather
+            if server_args.disaggregation_mode == "prefill" and pp_group is not None:
+                logger.warning(
+                    f"[DEBUG] _get_logits (after all_gather): PP{pp_group.rank_in_group}: "
+                    f"logits shape={logits.shape}, "
+                    f"logits min={logits.min().item():.4f}, max={logits.max().item():.4f}, "
+                    f"mean={logits.mean().item():.4f}, is_all_zero={torch.all(logits == 0).item()}"
+                )
 
         if self.do_tensor_parallel_all_gather_dp_attn:
             logits, global_logits = (

@@ -480,7 +480,7 @@ class TpModelWorker(BaseTpWorker):
             if self.server_args.disaggregation_mode == "prefill":
                 logger.warning(
                     f"[DEBUG] PP{self.pp_group.rank_in_group} TP{self.tp_rank}: "
-                    f"disaggregation_mode=prefill, is_prefill_only={model_worker_batch.is_prefill_only}, "
+                    f"is_prefill_only={model_worker_batch.is_prefill_only}, "
                     f"will_sample={not model_worker_batch.is_prefill_only}"
                 )
 
