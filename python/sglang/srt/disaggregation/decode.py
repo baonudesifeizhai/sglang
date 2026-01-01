@@ -738,7 +738,12 @@ class DecodeTransferQueue:
             output_hidden_states,
         ) = self.metadata_buffers.get_buf(idx)
 
-        decode_req.req.output_ids.append(output_id[0].item())
+        # In disaggregation mode, the output_id from prefill server is a dummy token ID
+        # used only for metadata buffer compatibility. It should not be added to req.output_ids
+        # as actual output, since prefill server doesn't generate real tokens.
+        # The actual token generation will be done by decode server.
+        # Skip appending the dummy token ID from prefill server.
+        # decode_req.req.output_ids.append(output_id[0].item())
         decode_req.req.cached_tokens = cached_tokens[0].item()
         if not self.spec_algorithm.is_none():
             decode_req.req.output_topk_p = output_topk_p
