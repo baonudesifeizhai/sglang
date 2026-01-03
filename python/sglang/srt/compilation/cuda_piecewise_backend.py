@@ -149,7 +149,9 @@ class CUDAPiecewiseBackend:
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
-            if entry.num_finished_warmup < 1:  # noqa
+            # Allow up to 2 warmup runs to ensure all layers are triggered
+            # Some layers might not be called in the first forward pass due to conditional execution
+            if entry.num_finished_warmup < 2:  # noqa
                 entry.num_finished_warmup += 1
                 return entry.runnable(*args)
 

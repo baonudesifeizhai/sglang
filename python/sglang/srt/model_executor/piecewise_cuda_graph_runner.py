@@ -527,11 +527,11 @@ class PiecewiseCudaGraphRunner:
                 )
             return
 
-        # run multiple times: warmup at the first time and cuda graph capture afterwards
+        # Run multiple times to ensure all layers are properly warmup'd and captured
+        # Each layer allows up to 2 warmup runs before attempting capture
+        # We run 4 times to ensure layers that are conditionally executed get enough chances
         # detail lies in sglang/python/sglang/srt/compilation/cuda_piecewise_backend.py
-        # We run 3 times instead of 2 to increase the chance that all layers capture their graphs
-        # Some layers might not be triggered in the second run due to conditional execution
-        for _ in range(3):
+        for _ in range(4):
             self.device_module.synchronize()
             self.model_runner.tp_group.barrier()
             run_once()
