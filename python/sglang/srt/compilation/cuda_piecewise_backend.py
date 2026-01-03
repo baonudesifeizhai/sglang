@@ -151,23 +151,7 @@ class CUDAPiecewiseBackend:
         if entry.cudagraph is None:
             if entry.num_finished_warmup < 1:  # noqa
                 entry.num_finished_warmup += 1
-                logger.debug(
-                    f"[PCG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                    f"Shape {runtime_shape} warmup (attempt {entry.num_finished_warmup})"
-                )
                 return entry.runnable(*args)
-
-            # Log diagnostic information when trying to capture graph
-            stream = get_pcg_capture_stream()
-            logger.warning(
-                f"[PCG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                f"Shape {runtime_shape} cudagraph is None, "
-                f"warmup={entry.num_finished_warmup}, "
-                f"stream={'set' if stream is not None else 'None'}, "
-                f"use_cudagraph={entry.use_cudagraph}, "
-                f"compiled={entry.compiled}, "
-                f"need_to_compile={entry.need_to_compile}"
-            )
 
             if self.compile_config.get_enable_debug_mode():
                 input_addresses = [
@@ -187,20 +171,8 @@ class CUDAPiecewiseBackend:
                     stack.enter_context(patch("gc.collect", lambda: None))
                     stack.enter_context(patch("torch.cuda.empty_cache", lambda: None))
                 # mind-exploding: carefully manage the reference and memory.
-                if stream is None:
-                    logger.error(
-                        f"[PCG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                        f"Shape {runtime_shape} attempting to capture graph but stream is None! "
-                        f"This indicates the shape was not fully captured during initialization. "
-                        f"Falling back to direct execution (may be slower)."
-                    )
-                    return entry.runnable(*args)
-
-                # At this point, stream should not be None, but keep assert for safety
-                assert stream is not None, (
-                    f"[PCG] Layer {self.piecewise_compile_index}: "
-                    f"Shape {runtime_shape} PCG capture stream is not set"
-                )
+                stream = get_pcg_capture_stream()
+                assert stream is not None, "PCG capture stream is not set"
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool, stream=stream):
                     # `output` is managed by pytorch's cudagraph pool
                     output = entry.runnable(*args)
@@ -218,10 +190,6 @@ class CUDAPiecewiseBackend:
             entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_captured += 1
-            logger.debug(
-                f"[PCG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                f"Shape {runtime_shape} CUDA graph captured successfully"
-            )
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
@@ -237,9 +205,5 @@ class CUDAPiecewiseBackend:
                 "Input addresses for cudagraphs are different during replay."
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
-        logger.debug(
-            f"[PCG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-            f"Shape {runtime_shape} replaying CUDA graph"
-        )
         entry.cudagraph.replay()
         return entry.output
