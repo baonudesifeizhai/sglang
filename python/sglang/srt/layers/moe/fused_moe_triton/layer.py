@@ -953,6 +953,20 @@ class FusedMoE(torch.nn.Module):
         if self.reduce_results and (self.moe_tp_size > 1 or self.moe_ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
+        # Debug: Check for NaN in MoE layer output
+        if torch.any(torch.isnan(final_hidden_states)):
+            logger.error(
+                f"NaN detected in MoE layer output! "
+                f"layer_id={self.layer_id}, "
+                f"shape={final_hidden_states.shape}, "
+                f"dtype={final_hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(final_hidden_states)).item()}, "
+                f"quant_method={type(self.quant_method).__name__ if self.quant_method else None}"
+            )
+            import traceback
+
+            traceback.print_stack()
+
         return final_hidden_states
 
     def run_moe_core(self, dispatch_output: DispatchOutput) -> CombineInput:
