@@ -383,11 +383,26 @@ class PiecewiseCudaGraphRunner:
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        logger.warning(
+            f"[PCG-CAPTURE-INIT] Starting piecewise CUDA graph capture. "
+            f"Total shapes to capture: {len(self.capture_num_tokens)}, "
+            f"Shapes: {self.capture_num_tokens[:10]}... (showing first 10)"
+        )
+
         with freeze_gc(
             self.model_runner.server_args.enable_cudagraph_gc
         ), graph_capture() as graph_capture_context:
             stream = graph_capture_context.stream
             with set_pcg_capture_stream(stream):
+                logger.warning(
+                    f"[PCG-CAPTURE-STREAM] Capture stream is now set. "
+                    f"All layers should detect stream is not None during capture."
+                )
+
                 avail_mem = get_available_gpu_memory(
                     self.model_runner.device,
                     self.model_runner.gpu_id,
@@ -410,8 +425,17 @@ class PiecewiseCudaGraphRunner:
                             f"Capturing num tokens ({num_tokens=} {avail_mem=:.2f} GB)"
                         )
 
+                    logger.warning(
+                        f"[PCG-CAPTURE-SHAPE] Processing shape {i+1}/{len(self.capture_num_tokens)}: "
+                        f"num_tokens={num_tokens}"
+                    )
                     with set_compiled(True):
                         self.capture_one_batch_size(num_tokens)
+
+        logger.warning(
+            f"[PCG-CAPTURE-COMPLETE] Finished all shape captures. "
+            f"Check logs above for any layers that were not triggered."
+        )
 
     def capture_one_batch_size(self, num_tokens: int):
         bs = 1
@@ -535,14 +559,25 @@ class PiecewiseCudaGraphRunner:
 
         logger = logging.getLogger(__name__)
 
+        logger.warning(
+            f"[PCG-CAPTURE-START] Starting capture for num_tokens={num_tokens}, "
+            f"will run 4 forward passes"
+        )
+
         for run_idx in range(4):
-            logger.debug(
-                f"[PCG-DEBUG] capture_one_batch_size: num_tokens={num_tokens}, "
-                f"run {run_idx + 1}/4"
+            logger.warning(
+                f"[PCG-CAPTURE-RUN] num_tokens={num_tokens}, "
+                f"forward pass {run_idx + 1}/4 - "
+                f"Expected: run {run_idx} = warmup, run {run_idx + 1} = warmup/capture"
             )
             self.device_module.synchronize()
             self.model_runner.tp_group.barrier()
             run_once()
+
+        logger.warning(
+            f"[PCG-CAPTURE-END] Finished 4 forward passes for num_tokens={num_tokens}. "
+            f"Check logs above to see which layers were called."
+        )
 
         return
 

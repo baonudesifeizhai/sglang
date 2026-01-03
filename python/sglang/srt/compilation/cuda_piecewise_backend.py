@@ -32,6 +32,12 @@ class ConcreteSizeEntry:
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
+    # Track when this entry was called during capture phase
+    capture_phase_called: bool = False
+    capture_phase_warmup_count: int = 0
+    capture_phase_attempted: bool = False
+    runtime_phase_called: bool = False
+
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: Optional[list[int]] = None
@@ -120,6 +126,14 @@ class CUDAPiecewiseBackend:
 
         entry = self.concrete_size_entries[runtime_shape]
 
+        # Track if we're in capture phase or runtime phase
+        stream = get_pcg_capture_stream()
+        is_capture_phase = stream is not None
+        if is_capture_phase:
+            entry.capture_phase_called = True
+        else:
+            entry.runtime_phase_called = True
+
         if entry.runnable is None:
             entry.runnable = self.compiled_graph_for_general_shape
 
@@ -153,33 +167,42 @@ class CUDAPiecewiseBackend:
             # Some layers might not be called in the first forward pass due to conditional execution
             if entry.num_finished_warmup < 2:  # noqa
                 entry.num_finished_warmup += 1
-                stream = get_pcg_capture_stream()
+                if is_capture_phase:
+                    entry.capture_phase_warmup_count = entry.num_finished_warmup
                 logger.warning(
-                    f"[PCG-DEBUG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                    f"Shape {runtime_shape} warmup attempt {entry.num_finished_warmup}/2, "
-                    f"stream={'set' if stream is not None else 'None'}, "
-                    f"use_cudagraph={entry.use_cudagraph}, compiled={entry.compiled}"
+                    f"[PCG-CAPTURE] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
+                    f"Shape {runtime_shape} warmup {entry.num_finished_warmup}/2, "
+                    f"phase={'CAPTURE' if is_capture_phase else 'RUNTIME'}, "
+                    f"capture_called={entry.capture_phase_called}, "
+                    f"runtime_called={entry.runtime_phase_called}"
                 )
                 return entry.runnable(*args)
 
-            stream = get_pcg_capture_stream()
+            # Ready to attempt capture
+            entry.capture_phase_attempted = True
             logger.error(
-                f"[PCG-DEBUG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                f"Shape {runtime_shape} attempting to capture, "
+                f"[PCG-CAPTURE] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
+                f"Shape {runtime_shape} attempting capture, "
                 f"warmup={entry.num_finished_warmup}, "
+                f"phase={'CAPTURE' if is_capture_phase else 'RUNTIME'}, "
                 f"stream={'set' if stream is not None else 'None'}, "
-                f"use_cudagraph={entry.use_cudagraph}, compiled={entry.compiled}, "
-                f"is_in_pcg_torch_compile={is_in_pcg_torch_compile()}, "
-                f"first_run_finished={self.first_run_finished}"
+                f"capture_called={entry.capture_phase_called}, "
+                f"capture_warmups={entry.capture_phase_warmup_count}, "
+                f"runtime_called={entry.runtime_phase_called}, "
+                f"use_cudagraph={entry.use_cudagraph}"
             )
 
             if stream is None:
                 logger.error(
-                    f"[PCG-DEBUG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                    f"Shape {runtime_shape} FAILED: stream is None when trying to capture! "
-                    f"This shape was not captured during initialization phase. "
-                    f"Warmup count: {entry.num_finished_warmup}, "
-                    f"Total layers: {self.total_piecewise_compiles}"
+                    f"[PCG-CAPTURE-ERROR] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
+                    f"Shape {runtime_shape} FAILED - stream is None! "
+                    f"Diagnosis: This layer/shape was NOT triggered during capture phase. "
+                    f"Capture phase called={entry.capture_phase_called}, "
+                    f"Capture warmups={entry.capture_phase_warmup_count}, "
+                    f"Runtime called={entry.runtime_phase_called}, "
+                    f"Total warmups={entry.num_finished_warmup}. "
+                    f"This indicates the layer was skipped during capture for this shape, "
+                    f"likely due to conditional execution or the shape not being in capture list."
                 )
 
             if self.compile_config.get_enable_debug_mode():
@@ -224,8 +247,11 @@ class CUDAPiecewiseBackend:
 
             compilation_counter.num_cudagraph_captured += 1
             logger.warning(
-                f"[PCG-DEBUG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                f"Shape {runtime_shape} CUDA graph captured successfully (after {entry.num_finished_warmup} warmups)"
+                f"[PCG-CAPTURE-SUCCESS] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
+                f"Shape {runtime_shape} CUDA graph captured successfully! "
+                f"Phase={'CAPTURE' if is_capture_phase else 'RUNTIME'}, "
+                f"Total warmups={entry.num_finished_warmup}, "
+                f"Capture warmups={entry.capture_phase_warmup_count}"
             )
 
             # important: we need to return the output, rather than
