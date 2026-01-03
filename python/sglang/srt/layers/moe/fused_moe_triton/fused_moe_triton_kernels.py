@@ -681,6 +681,15 @@ def invoke_fused_moe_kernel(
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
         assert bias is None
+        # Handle C tensor stride based on its dimensionality
+        # C can be either 2D (M*topk, N) or 3D (M, topk, N)
+        if C.ndim == 3:
+            stride_cm = C.stride(0)
+            stride_cn = C.stride(2)
+        else:
+            # C is 2D
+            stride_cm = C.stride(0)
+            stride_cn = C.stride(1)
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
@@ -700,8 +709,8 @@ def invoke_fused_moe_kernel(
             B.stride(0),
             B.stride(2),
             B.stride(1),
-            C.stride(1),
-            C.stride(2),
+            stride_cm,
+            stride_cn,
             B_scale.stride(0),
             B_scale.stride(2),
             B_scale.stride(1),
