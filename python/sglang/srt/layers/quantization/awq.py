@@ -317,7 +317,15 @@ class AWQMarlinConfig(QuantizationConfig):
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels."
                 )
-                return MoeWNA16Config.from_config(self.full_config).get_quant_method(
+                # Create a modified config with quant_method set to "awq" for MoeWNA16Config
+                # since it only supports "gptq" and "awq", not "awq_marlin"
+                moe_config = dict(self.full_config)
+                if moe_config.get("quant_method", "").lower() in (
+                    "awq_marlin",
+                    "marlin",
+                ):
+                    moe_config["quant_method"] = "awq"
+                return MoeWNA16Config.from_config(moe_config).get_quant_method(
                     layer, prefix
                 )
             return AWQMoEMethod(self)
