@@ -531,7 +531,15 @@ class PiecewiseCudaGraphRunner:
         # Each layer allows up to 2 warmup runs before attempting capture
         # We run 4 times to ensure layers that are conditionally executed get enough chances
         # detail lies in sglang/python/sglang/srt/compilation/cuda_piecewise_backend.py
-        for _ in range(4):
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        for run_idx in range(4):
+            logger.debug(
+                f"[PCG-DEBUG] capture_one_batch_size: num_tokens={num_tokens}, "
+                f"run {run_idx + 1}/4"
+            )
             self.device_module.synchronize()
             self.model_runner.tp_group.barrier()
             run_once()
