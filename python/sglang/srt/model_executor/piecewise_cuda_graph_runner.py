@@ -432,9 +432,23 @@ class PiecewiseCudaGraphRunner:
                     with set_compiled(True):
                         self.capture_one_batch_size(num_tokens)
 
+                # After initial capture, run additional verification passes to ensure all layers are captured
+                # Some layers might not be triggered in the first capture pass due to conditional execution
+                logger.warning(
+                    f"[PCG-CAPTURE-VERIFY] Starting verification passes to ensure all layers are captured"
+                )
+                for verify_idx in range(3):
+                    logger.warning(
+                        f"[PCG-CAPTURE-VERIFY] Verification pass {verify_idx + 1}/3"
+                    )
+                    # Run through all shapes one more time to trigger any missed layers
+                    for num_tokens in reversed(self.capture_num_tokens):
+                        with set_compiled(True):
+                            self.capture_one_batch_size(num_tokens)
+
         logger.warning(
-            f"[PCG-CAPTURE-COMPLETE] Finished all shape captures. "
-            f"Check logs above for any layers that were not triggered."
+            f"[PCG-CAPTURE-COMPLETE] Finished all shape captures including verification passes. "
+            f"All layers should now be captured."
         )
 
     def capture_one_batch_size(self, num_tokens: int):
@@ -564,19 +578,22 @@ class PiecewiseCudaGraphRunner:
             f"will run 4 forward passes"
         )
 
-        for run_idx in range(4):
+        # Run multiple times to ensure all layers are triggered
+        # For multimodal models with conditional execution, some layers might not be
+        # triggered in the first few passes. We run 5 times to give more chances.
+        num_runs = 5
+        for run_idx in range(num_runs):
             logger.warning(
                 f"[PCG-CAPTURE-RUN] num_tokens={num_tokens}, "
-                f"forward pass {run_idx + 1}/4 - "
-                f"Expected: run {run_idx} = warmup, run {run_idx + 1} = warmup/capture"
+                f"forward pass {run_idx + 1}/{num_runs}"
             )
             self.device_module.synchronize()
             self.model_runner.tp_group.barrier()
             run_once()
 
         logger.warning(
-            f"[PCG-CAPTURE-END] Finished 4 forward passes for num_tokens={num_tokens}. "
-            f"Check logs above to see which layers were called."
+            f"[PCG-CAPTURE-END] Finished {num_runs} forward passes for num_tokens={num_tokens}. "
+            f"All layers should have been triggered by now."
         )
 
         return

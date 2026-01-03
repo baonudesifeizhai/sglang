@@ -110,6 +110,23 @@ class CUDAPiecewiseBackend:
             # save the hash of the inductor graph for the next run
             self.sglang_backend.compiler_manager.save_to_file()
 
+    def get_uncaptured_shapes(self) -> list[int]:
+        """Return list of shapes that should be captured but haven't been captured yet."""
+        uncaptured = []
+        for shape, entry in self.concrete_size_entries.items():
+            if entry.use_cudagraph and entry.cudagraph is None:
+                # Only report shapes that should use CUDA graph but weren't captured
+                uncaptured.append(shape)
+        return uncaptured
+
+    def get_untriggered_in_capture_shapes(self) -> list[int]:
+        """Return list of shapes that were never called during capture phase."""
+        untriggered = []
+        for shape, entry in self.concrete_size_entries.items():
+            if entry.use_cudagraph and not entry.capture_phase_called:
+                untriggered.append(shape)
+        return untriggered
+
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
@@ -163,15 +180,17 @@ class CUDAPiecewiseBackend:
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
-            # Allow up to 2 warmup runs to ensure all layers are triggered
+            # In capture phase: allow up to 3 warmup runs to ensure all layers are triggered
+            # In runtime phase: only allow 1 warmup to avoid delaying execution
             # Some layers might not be called in the first forward pass due to conditional execution
-            if entry.num_finished_warmup < 2:  # noqa
+            max_warmup = 3 if is_capture_phase else 1
+            if entry.num_finished_warmup < max_warmup:  # noqa
                 entry.num_finished_warmup += 1
                 if is_capture_phase:
                     entry.capture_phase_warmup_count = entry.num_finished_warmup
                 logger.warning(
                     f"[PCG-CAPTURE] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
-                    f"Shape {runtime_shape} warmup {entry.num_finished_warmup}/2, "
+                    f"Shape {runtime_shape} warmup {entry.num_finished_warmup}/{max_warmup}, "
                     f"phase={'CAPTURE' if is_capture_phase else 'RUNTIME'}, "
                     f"capture_called={entry.capture_phase_called}, "
                     f"runtime_called={entry.runtime_phase_called}"
@@ -203,6 +222,13 @@ class CUDAPiecewiseBackend:
                     f"Total warmups={entry.num_finished_warmup}. "
                     f"This indicates the layer was skipped during capture for this shape, "
                     f"likely due to conditional execution or the shape not being in capture list."
+                )
+                raise AssertionError(
+                    f"[PCG] Layer {self.piecewise_compile_index}/{self.total_piecewise_compiles - 1}: "
+                    f"Shape {runtime_shape} PCG capture stream is not set. "
+                    f"This layer/shape combination was not captured during initialization. "
+                    f"Capture phase called={entry.capture_phase_called}, "
+                    f"Capture warmups={entry.capture_phase_warmup_count}"
                 )
 
             if self.compile_config.get_enable_debug_mode():
