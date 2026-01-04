@@ -941,17 +941,6 @@ class FusedMoE(torch.nn.Module):
             dispatch_output=dispatch_output,
         )
 
-        # Debug: Check for NaN after run_moe_core (only for layer 3)
-        if self.layer_id == 3:
-            combine_hidden_states = combine_input.hidden_states
-            if torch.any(torch.isnan(combine_hidden_states)):
-                logger.error(
-                    f"NaN detected after run_moe_core in FusedMoE.forward_impl (layer 3)! "
-                    f"shape={combine_hidden_states.shape}, "
-                    f"dtype={combine_hidden_states.dtype}, "
-                    f"num_nan={torch.sum(torch.isnan(combine_hidden_states)).item()}"
-                )
-
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
         ):

@@ -681,6 +681,21 @@ def invoke_fused_moe_kernel(
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
         assert bias is None
+
+        # Debug: Log B_zp and has_zp for int4_w4a16
+        if use_int4_w4a16:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            has_zp = B_zp is not None
+            logger.warning(
+                f"invoke_fused_moe_kernel (w1): use_int4_w4a16=True, "
+                f"B_zp is None={B_zp is None}, has_zp={has_zp}, "
+                f"block_shape={block_shape}, "
+                f"B_scale shape={B_scale.shape if B_scale is not None else None}, "
+                f"B_scale has_nan={torch.any(torch.isnan(B_scale)).item() if B_scale is not None else False}"
+            )
+
         # Handle C tensor stride based on its dimensionality
         # C can be either 2D (M*topk, N) or 3D (M, topk, N)
         if C.ndim == 3:
