@@ -445,6 +445,21 @@ def fused_experts_impl(
             curr_topk_ids, config["BLOCK_SIZE_M"], E
         )
 
+        # Debug: Check inputs before first GEMM
+        if use_int4_w4a16 and (
+            torch.any(torch.isnan(curr_hidden_states))
+            or (w1_scale is not None and torch.any(torch.isnan(w1_scale)))
+            or (w1_zp is not None and torch.any(torch.isnan(w1_zp.to(torch.float32))))
+        ):
+            logger.error(
+                f"NaN in inputs before w1 GEMM! "
+                f"hidden_states_has_nan={torch.any(torch.isnan(curr_hidden_states)).item()}, "
+                f"w1_scale_has_nan={w1_scale is not None and torch.any(torch.isnan(w1_scale)).item() if w1_scale is not None else False}, "
+                f"w1_zp_has_nan={w1_zp is not None and torch.any(torch.isnan(w1_zp.to(torch.float32))).item() if w1_zp is not None else False}, "
+                f"w1_shape={w1.shape}, w1_scale_shape={w1_scale.shape if w1_scale is not None else None}, "
+                f"block_shape={block_shape}"
+            )
+
         invoke_fused_moe_kernel(
             curr_hidden_states,
             w1,
