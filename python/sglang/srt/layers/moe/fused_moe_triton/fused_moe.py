@@ -445,21 +445,6 @@ def fused_experts_impl(
             curr_topk_ids, config["BLOCK_SIZE_M"], E
         )
 
-        # Debug: Check inputs before first GEMM
-        if use_int4_w4a16 and (
-            torch.any(torch.isnan(curr_hidden_states))
-            or (w1_scale is not None and torch.any(torch.isnan(w1_scale)))
-            or (w1_zp is not None and torch.any(torch.isnan(w1_zp.to(torch.float32))))
-        ):
-            logger.error(
-                f"NaN in inputs before w1 GEMM! "
-                f"hidden_states_has_nan={torch.any(torch.isnan(curr_hidden_states)).item()}, "
-                f"w1_scale_has_nan={w1_scale is not None and torch.any(torch.isnan(w1_scale)).item() if w1_scale is not None else False}, "
-                f"w1_zp_has_nan={w1_zp is not None and torch.any(torch.isnan(w1_zp.to(torch.float32))).item() if w1_zp is not None else False}, "
-                f"w1_shape={w1.shape}, w1_scale_shape={w1_scale.shape if w1_scale is not None else None}, "
-                f"block_shape={block_shape}"
-            )
-
         invoke_fused_moe_kernel(
             curr_hidden_states,
             w1,
@@ -486,18 +471,6 @@ def fused_experts_impl(
             c_sorted=down_moe_use_tma,
             filter_expert=filter_expert,
         )
-
-        # Debug: Check for NaN after first GEMM (w1)
-        if torch.any(torch.isnan(intermediate_cache1)):
-            logger.error(
-                f"NaN detected in intermediate_cache1 (after w1 GEMM in fused_experts_impl)! "
-                f"shape={intermediate_cache1.shape}, "
-                f"dtype={intermediate_cache1.dtype}, "
-                f"num_nan={torch.sum(torch.isnan(intermediate_cache1)).item()}, "
-                f"use_int8_w8a16={use_int8_w8a16}, "
-                f"use_int4_w4a16={use_int4_w4a16}, "
-                f"block_shape={block_shape}"
-            )
 
         # Activation function with multiplication
         if activation == "silu" and is_gated:
@@ -555,15 +528,6 @@ def fused_experts_impl(
         else:
             raise ValueError(f"Unsupported activation: {activation=}, with {is_gated=}")
 
-        # Debug: Check for NaN after activation
-        if torch.any(torch.isnan(intermediate_cache2)):
-            logger.error(
-                f"NaN detected in intermediate_cache2 (after activation in fused_experts_impl)! "
-                f"shape={intermediate_cache2.shape}, "
-                f"dtype={intermediate_cache2.dtype}, "
-                f"num_nan={torch.sum(torch.isnan(intermediate_cache2)).item()}"
-            )
-
         invoke_fused_moe_kernel(
             intermediate_cache2,
             w2,
@@ -595,24 +559,6 @@ def fused_experts_impl(
             b_use_tma=down_moe_use_tma,
             filter_expert=filter_expert,
         )
-
-        # Debug: Check for NaN after second GEMM (w2)
-        output_to_check = (
-            intermediate_cache3
-            if not no_combine and topk_ids.shape[1] != 1
-            else out_hidden_states[begin_chunk_idx:end_chunk_idx]
-        )
-        if torch.any(torch.isnan(output_to_check)):
-            logger.error(
-                f"NaN detected after w2 GEMM (in fused_experts_impl)! "
-                f"shape={output_to_check.shape}, "
-                f"dtype={output_to_check.dtype}, "
-                f"num_nan={torch.sum(torch.isnan(output_to_check)).item()}, "
-                f"use_int8_w8a16={use_int8_w8a16}, "
-                f"use_int4_w4a16={use_int4_w4a16}, "
-                f"block_shape={block_shape}, "
-                f"no_combine={no_combine}, topk={topk_ids.shape[1]}"
-            )
 
         if routed_scaling_factor is None:
             routed_scaling_factor = 1.0

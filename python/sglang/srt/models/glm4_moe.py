@@ -773,9 +773,29 @@ class Glm4MoeDecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
 
+        # Debug: Check for NaN after attention
+        if torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected after self_attn in Glm4MoeDecoderLayer! "
+                f"layer_id={self.layer_id}, "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
+
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
+
+        # Debug: Check for NaN before mlp (after prepare_mlp)
+        if torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected before mlp (after prepare_mlp) in Glm4MoeDecoderLayer! "
+                f"layer_id={self.layer_id}, "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
 
         should_allreduce_fusion = (
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
