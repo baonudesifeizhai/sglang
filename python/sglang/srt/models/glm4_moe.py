@@ -763,6 +763,16 @@ class Glm4MoeDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
 
+        # Debug: Check for NaN at the beginning of forward
+        if torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected at forward entry in Glm4MoeDecoderLayer! "
+                f"layer_id={self.layer_id}, "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
+
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
