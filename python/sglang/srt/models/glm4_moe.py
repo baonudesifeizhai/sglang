@@ -777,16 +777,6 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
 
-        # Debug: Check for NaN before attention (after prepare_attn)
-        if torch.any(torch.isnan(hidden_states)):
-            logger.error(
-                f"NaN detected before self_attn (after prepare_attn) in Glm4MoeDecoderLayer! "
-                f"layer_id={self.layer_id}, "
-                f"shape={hidden_states.shape}, "
-                f"dtype={hidden_states.dtype}, "
-                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
-            )
-
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
