@@ -773,6 +773,15 @@ class Glm4MoeDecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
 
+        # Debug: Check for NaN after attention (only for layer 5)
+        if self.layer_id == 5 and torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected after self_attn in layer 5! "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
+
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
@@ -791,6 +800,16 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states = self.mlp(
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
+
+        # Debug: Check for NaN after mlp (only for layer 5)
+        if self.layer_id == 5 and torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected after mlp in layer 5! "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}, "
+                f"is_layer_sparse={self.is_layer_sparse}"
+            )
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -956,14 +975,6 @@ class Glm4MoeModel(nn.Module):
                     forward_batch,
                     residual,
                 )
-                # Debug: Check for NaN after each layer
-                if torch.any(torch.isnan(hidden_states)):
-                    logger.error(
-                        f"NaN detected after layer {i} in Glm4MoeModel! "
-                        f"shape={hidden_states.shape}, "
-                        f"dtype={hidden_states.dtype}, "
-                        f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
-                    )
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(
