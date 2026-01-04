@@ -763,10 +763,10 @@ class Glm4MoeDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
 
-        # Debug: Check for NaN at forward entry (only for layer 2)
-        if self.layer_id == 2 and torch.any(torch.isnan(hidden_states)):
+        # Debug: Check for NaN at forward entry (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
             logger.error(
-                f"NaN detected at forward entry in layer 2! "
+                f"NaN detected at forward entry in layer 3! "
                 f"shape={hidden_states.shape}, "
                 f"dtype={hidden_states.dtype}, "
                 f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
@@ -776,10 +776,10 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
 
-        # Debug: Check for NaN before attention (only for layer 2)
-        if self.layer_id == 2 and torch.any(torch.isnan(hidden_states)):
+        # Debug: Check for NaN before attention (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
             logger.error(
-                f"NaN detected before self_attn in layer 2 (after prepare_attn)! "
+                f"NaN detected before self_attn in layer 3 (after prepare_attn)! "
                 f"shape={hidden_states.shape}, "
                 f"dtype={hidden_states.dtype}, "
                 f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
@@ -791,10 +791,10 @@ class Glm4MoeDecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
 
-        # Debug: Check for NaN after attention (only for layer 2)
-        if self.layer_id == 2 and torch.any(torch.isnan(hidden_states)):
+        # Debug: Check for NaN after attention (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
             logger.error(
-                f"NaN detected after self_attn in layer 2! "
+                f"NaN detected after self_attn in layer 3! "
                 f"shape={hidden_states.shape}, "
                 f"dtype={hidden_states.dtype}, "
                 f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
@@ -819,10 +819,10 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
 
-        # Debug: Check for NaN after mlp (only for layer 2)
-        if self.layer_id == 2 and torch.any(torch.isnan(hidden_states)):
+        # Debug: Check for NaN after mlp (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
             logger.error(
-                f"NaN detected after mlp in layer 2! "
+                f"NaN detected after mlp in layer 3! "
                 f"shape={hidden_states.shape}, "
                 f"dtype={hidden_states.dtype}, "
                 f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}, "
