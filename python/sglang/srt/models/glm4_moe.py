@@ -508,6 +508,15 @@ class Glm4MoeSparseMoeBlock(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
+        # Debug: Check for NaN before MoE (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected before MoE in layer 3 (in Glm4MoeSparseMoeBlock.forward_normal)! "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
+
         if hidden_states.shape[0] > 0:
             shared_output = self._forward_shared_experts(hidden_states)
             # router_logits: (num_tokens, n_experts)
@@ -517,7 +526,25 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
+        # Debug: Check for NaN before experts call (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected before experts() call in layer 3! "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
+
         final_hidden_states = self.experts(hidden_states, topk_output)
+
+        # Debug: Check for NaN after experts call (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(final_hidden_states)):
+            logger.error(
+                f"NaN detected after experts() call in layer 3! "
+                f"shape={final_hidden_states.shape}, "
+                f"dtype={final_hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(final_hidden_states)).item()}"
+            )
         if not _is_cuda and not _use_aiter:
             final_hidden_states *= self.routed_scaling_factor
         if shared_output is not None:
