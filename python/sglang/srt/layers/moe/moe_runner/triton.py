@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import triton.language as tl
+
+logger = logging.getLogger(__name__)
 
 from sglang.srt.layers.moe.moe_runner.base import (
     MoeQuantInfo,
@@ -192,6 +195,20 @@ class TritonRunnerCore(MoeRunnerCore):
             block_shape=block_shape,
         )
 
+        # Debug: Check for NaN after first GEMM (w13)
+        if torch.any(torch.isnan(intermediate_cache1)):
+            layer_id = self.config.layer_id if self.config.layer_id is not None else -1
+            logger.error(
+                f"NaN detected in intermediate_cache1 (after w13 GEMM)! "
+                f"layer_id={layer_id}, "
+                f"shape={intermediate_cache1.shape}, "
+                f"dtype={intermediate_cache1.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(intermediate_cache1)).item()}, "
+                f"use_int8_w8a16={use_int8_w8a16}, "
+                f"use_int4_w4a16={use_int4_w4a16}, "
+                f"block_shape={block_shape}"
+            )
+
         intermediate_cache2 = torch.empty(
             (M * topk_ids.shape[1], N // 2),
             device=hidden_states.device,
@@ -223,6 +240,17 @@ class TritonRunnerCore(MoeRunnerCore):
                 )
         else:
             raise ValueError(f"Unsupported activation: {activation=}")
+
+        # Debug: Check for NaN after activation
+        if torch.any(torch.isnan(intermediate_cache2)):
+            layer_id = self.config.layer_id if self.config.layer_id is not None else -1
+            logger.error(
+                f"NaN detected in intermediate_cache2 (after activation)! "
+                f"layer_id={layer_id}, "
+                f"shape={intermediate_cache2.shape}, "
+                f"dtype={intermediate_cache2.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(intermediate_cache2)).item()}"
+            )
 
         intermediate_cache3 = torch.empty(
             (M, topk_ids.shape[1], w2.shape[1]),
@@ -270,6 +298,26 @@ class TritonRunnerCore(MoeRunnerCore):
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
         )
+
+        # Debug: Check for NaN after second GEMM (w2)
+        output_to_check = (
+            intermediate_cache3
+            if not no_combine and topk_ids.shape[1] != 1
+            else out_hidden_states
+        )
+        if torch.any(torch.isnan(output_to_check)):
+            layer_id = self.config.layer_id if self.config.layer_id is not None else -1
+            logger.error(
+                f"NaN detected after w2 GEMM! "
+                f"layer_id={layer_id}, "
+                f"shape={output_to_check.shape}, "
+                f"dtype={output_to_check.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(output_to_check)).item()}, "
+                f"use_int8_w8a16={use_int8_w8a16}, "
+                f"use_int4_w4a16={use_int4_w4a16}, "
+                f"block_shape={block_shape}, "
+                f"no_combine={no_combine}, topk={topk_ids.shape[1]}"
+            )
 
         if routed_scaling_factor is None:
             routed_scaling_factor = 1.0
