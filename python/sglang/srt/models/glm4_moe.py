@@ -518,15 +518,6 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
-
-        # Debug: Check for NaN after experts call (only for layer 3)
-        if self.layer_id == 3 and torch.any(torch.isnan(final_hidden_states)):
-            logger.error(
-                f"NaN detected after experts() call in layer 3! "
-                f"shape={final_hidden_states.shape}, "
-                f"dtype={final_hidden_states.dtype}, "
-                f"num_nan={torch.sum(torch.isnan(final_hidden_states)).item()}"
-            )
         if not _is_cuda and not _use_aiter:
             final_hidden_states *= self.routed_scaling_factor
         if shared_output is not None:

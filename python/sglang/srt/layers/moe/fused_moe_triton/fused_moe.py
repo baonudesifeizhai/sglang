@@ -472,6 +472,18 @@ def fused_experts_impl(
             filter_expert=filter_expert,
         )
 
+        # Debug: Check for NaN after w1 GEMM (invoke_fused_moe_kernel)
+        if torch.any(torch.isnan(intermediate_cache1)):
+            logger.error(
+                f"NaN detected after w1 GEMM in fused_experts_impl! "
+                f"shape={intermediate_cache1.shape}, "
+                f"dtype={intermediate_cache1.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(intermediate_cache1)).item()}, "
+                f"use_int4_w4a16={use_int4_w4a16}, "
+                f"block_shape={block_shape}, "
+                f"chunk={chunk}"
+            )
+
         # Activation function with multiplication
         if activation == "silu" and is_gated:
             if gemm1_alpha is not None:
