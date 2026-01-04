@@ -705,6 +705,25 @@ def invoke_fused_moe_kernel(
             # C is 2D
             stride_cm = C.stride(0)
             stride_cn = C.stride(1)
+
+        # Handle B_scale and B_zp strides based on their dimensionality
+        # They should be 3D tensors for int4_w4a16, but handle safely
+        stride_bse = B_scale.stride(0) if B_scale.ndim >= 1 else 0
+        stride_bsk = (
+            B_scale.stride(2)
+            if B_scale.ndim == 3
+            else (B_scale.stride(1) if B_scale.ndim == 2 else 0)
+        )
+        stride_bsn = B_scale.stride(1) if B_scale.ndim >= 2 else 0
+
+        stride_bze = B_zp.stride(0) if B_zp is not None and B_zp.ndim >= 1 else 0
+        stride_bzk = (
+            B_zp.stride(2)
+            if B_zp is not None and B_zp.ndim == 3
+            else (B_zp.stride(1) if B_zp is not None and B_zp.ndim == 2 else 0)
+        )
+        stride_bzn = B_zp.stride(1) if B_zp is not None and B_zp.ndim >= 2 else 0
+
         fused_moe_kernel_gptq_awq[grid](
             A,
             B,
@@ -726,12 +745,12 @@ def invoke_fused_moe_kernel(
             B.stride(1),
             stride_cm,
             stride_cn,
-            B_scale.stride(0),
-            B_scale.stride(2),
-            B_scale.stride(1),
-            B_zp.stride(0) if B_zp is not None else 0,
-            B_zp.stride(2) if B_zp is not None else 0,
-            B_zp.stride(1) if B_zp is not None else 0,
+            stride_bse,
+            stride_bsk,
+            stride_bsn,
+            stride_bze,
+            stride_bzk,
+            stride_bzn,
             group_size=block_shape[1],
             MUL_ROUTED_WEIGHT=mul_routed_weight,
             top_k=top_k,
