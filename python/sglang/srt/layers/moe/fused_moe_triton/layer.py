@@ -923,9 +923,30 @@ class FusedMoE(torch.nn.Module):
         origin_hidden_states_dim = hidden_states.shape[-1]
         assert self.quant_method is not None
 
+        # Debug: Check for NaN in input (only for layer 3)
+        if self.layer_id == 3 and torch.any(torch.isnan(hidden_states)):
+            logger.error(
+                f"NaN detected in FusedMoE.forward_impl input (layer 3)! "
+                f"shape={hidden_states.shape}, "
+                f"dtype={hidden_states.dtype}, "
+                f"num_nan={torch.sum(torch.isnan(hidden_states)).item()}"
+            )
+
         dispatch_output = self.dispatcher.dispatch(
             hidden_states=hidden_states, topk_output=topk_output
         )
+
+        # Debug: Check for NaN after dispatch (only for layer 3)
+        if self.layer_id == 3:
+            dispatch_hidden_states = dispatch_output.hidden_states
+            if torch.any(torch.isnan(dispatch_hidden_states)):
+                logger.error(
+                    f"NaN detected after dispatch in FusedMoE.forward_impl (layer 3)! "
+                    f"shape={dispatch_hidden_states.shape}, "
+                    f"dtype={dispatch_hidden_states.dtype}, "
+                    f"num_nan={torch.sum(torch.isnan(dispatch_hidden_states)).item()}"
+                )
+
         if _use_aiter and self.dispatcher.local_expert_mapping is not None:
             self.expert_mask_gpu = (
                 (
@@ -940,6 +961,17 @@ class FusedMoE(torch.nn.Module):
             dispatch_output=dispatch_output,
         )
 
+        # Debug: Check for NaN after run_moe_core (only for layer 3)
+        if self.layer_id == 3:
+            combine_hidden_states = combine_input.hidden_states
+            if torch.any(torch.isnan(combine_hidden_states)):
+                logger.error(
+                    f"NaN detected after run_moe_core in FusedMoE.forward_impl (layer 3)! "
+                    f"shape={combine_hidden_states.shape}, "
+                    f"dtype={combine_hidden_states.dtype}, "
+                    f"num_nan={torch.sum(torch.isnan(combine_hidden_states)).item()}"
+                )
+
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
         ):
@@ -950,8 +982,26 @@ class FusedMoE(torch.nn.Module):
                 ..., :origin_hidden_states_dim
             ].contiguous()
 
+            # Debug: Check for NaN after combine (only for layer 3)
+            if self.layer_id == 3 and torch.any(torch.isnan(final_hidden_states)):
+                logger.error(
+                    f"NaN detected after combine in FusedMoE.forward_impl (layer 3)! "
+                    f"shape={final_hidden_states.shape}, "
+                    f"dtype={final_hidden_states.dtype}, "
+                    f"num_nan={torch.sum(torch.isnan(final_hidden_states)).item()}"
+                )
+
         if self.reduce_results and (self.moe_tp_size > 1 or self.moe_ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+
+            # Debug: Check for NaN after all_reduce (only for layer 3)
+            if self.layer_id == 3 and torch.any(torch.isnan(final_hidden_states)):
+                logger.error(
+                    f"NaN detected after all_reduce in FusedMoE.forward_impl (layer 3)! "
+                    f"shape={final_hidden_states.shape}, "
+                    f"dtype={final_hidden_states.dtype}, "
+                    f"num_nan={torch.sum(torch.isnan(final_hidden_states)).item()}"
+                )
 
         return final_hidden_states
 
