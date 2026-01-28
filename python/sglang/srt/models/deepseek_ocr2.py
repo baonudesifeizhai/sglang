@@ -191,6 +191,18 @@ class DeepseekOCR2ForCausalLM(nn.Module):
             config, "image_token_index", None
         )
 
+    def _module_dtype(self, module: nn.Module) -> torch.dtype:
+        try:
+            return next(module.parameters()).dtype
+        except StopIteration:
+            return torch.get_default_dtype()
+
+    def _module_device(self, module: nn.Module) -> torch.device:
+        try:
+            return next(module.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+
     def _parse_and_validate_image_input(self, **kwargs: object):
         pixel_values = kwargs.pop("pixel_values", None)
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
@@ -218,9 +230,10 @@ class DeepseekOCR2ForCausalLM(nn.Module):
         images_spatial_crop: torch.Tensor,
     ) -> list[torch.Tensor]:
         images_in_this_batch = []
+        dtype = self._module_dtype(self.sam_model)
         with torch.no_grad():
             for jdx in range(images_spatial_crop.size(0)):
-                patches = images_crop[jdx][0].to(torch.bfloat16)
+                patches = images_crop[jdx][0].to(dtype=dtype)
                 image_ori = pixel_values[jdx]
 
                 if torch.sum(patches).item() != 0:
@@ -268,18 +281,20 @@ class DeepseekOCR2ForCausalLM(nn.Module):
         return images_in_this_batch
 
     def _process_image_input(self, mm_items: List[MultimodalDataItem]) -> torch.Tensor:
-        pixel_values = torch.stack([item.feature for item in mm_items], dim=0).type(
-            self.sam_model.dtype
+        dtype = self._module_dtype(self.sam_model)
+        device = self._module_device(self.sam_model)
+        pixel_values = torch.stack([item.feature for item in mm_items], dim=0).to(
+            device=device, dtype=dtype
         )
         images_crop = (
             torch.stack([item.images_crop for item in mm_items], dim=0)
             .type(torch.long)
-            .to(device=pixel_values.device)
+            .to(device=device)
         )
         images_spatial_crop = (
             torch.cat([item.images_spatial_crop for item in mm_items], dim=0)
             .type(torch.long)
-            .to(device=pixel_values.device)
+            .to(device=device)
         )
         assert images_crop.dim() == 6
         assert images_spatial_crop.dim() == 3
@@ -289,7 +304,7 @@ class DeepseekOCR2ForCausalLM(nn.Module):
             images_crop=images_crop,
             images_spatial_crop=images_spatial_crop,
         )
-        return torch.cat(vision_feature_lists, dim=0).type(self.sam_model.dtype)
+        return torch.cat(vision_feature_lists, dim=0).to(device=device, dtype=dtype)
 
     def get_multimodal_embeddings(
         self, **kwargs: object
