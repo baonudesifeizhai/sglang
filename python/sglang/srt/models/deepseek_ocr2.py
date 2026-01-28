@@ -306,6 +306,8 @@ class DeepseekOCR2ForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "qwen2_model" in name:
+                name = name.replace("qwen2_model", "vision_model")
             if name == "lm_head.weight":
                 name = "model.lm_head.weight"
             elif name.startswith("model."):
@@ -315,6 +317,7 @@ class DeepseekOCR2ForCausalLM(nn.Module):
                         "projector",
                         "vision_model",
                         "sam_model",
+                        "qwen2_model",
                         "view_seperator",
                     ]
                 ):
@@ -325,6 +328,8 @@ class DeepseekOCR2ForCausalLM(nn.Module):
                     or "sam_model" in name
                 ):
                     name = name.replace("model.", "model.model.")
+            while ".model.model." in name:
+                name = name.replace(".model.model.", ".model.")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
