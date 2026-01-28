@@ -8,9 +8,24 @@ import torch.nn.functional as F
 import transformers
 
 
+class _CfgWrapper:
+    def __init__(self, cfg: dict):
+        self._cfg = cfg
+
+    def __getattr__(self, item):
+        if item in self._cfg:
+            return self._cfg[item]
+        raise AttributeError(item)
+
+    def get(self, key, default=None):
+        return self._cfg.get(key, default)
+
+
 class MlpProjector(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+        if isinstance(cfg, dict):
+            cfg = _CfgWrapper(cfg)
         self.cfg = cfg
 
         if cfg.projector_type == "identity":
