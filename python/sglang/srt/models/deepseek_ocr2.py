@@ -330,6 +330,13 @@ class DeepseekOCR2ForCausalLM(nn.Module):
                     name = name.replace("model.", "model.model.")
             while ".model.model." in name:
                 name = name.replace(".model.model.", ".model.")
+            if (
+                name.startswith("vision_model.model.")
+                and "vision_model.model.model." not in name
+            ):
+                name = name.replace(
+                    "vision_model.model.", "vision_model.model.model.", 1
+                )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
