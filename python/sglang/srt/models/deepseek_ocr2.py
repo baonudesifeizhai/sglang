@@ -76,8 +76,10 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int | list[int],
+    placeholder_token_id: int | list[int] | None,
 ) -> torch.Tensor:
+    if placeholder_token_id is None:
+        return inputs_embeds
     if isinstance(placeholder_token_id, list):
         is_multimodal = torch.isin(
             input_ids,
@@ -90,6 +92,49 @@ def merge_multimodal_embeddings(
         multimodal_embeddings=multimodal_embeddings,
         is_multimodal=is_multimodal,
     )
+
+
+def _is_vision_weight_name(name: str) -> bool:
+    return any(
+        token in name
+        for token in (
+            "qwen2_model",
+            "vision_model",
+            "sam_model",
+            "projector",
+            "view_seperator",
+        )
+    )
+
+
+def _collapse_model_prefix(name: str) -> str:
+    while ".model.model.model." in name:
+        name = name.replace(".model.model.model.", ".model.model.")
+    return name
+
+
+def _normalize_weight_name(raw_name: str) -> Tuple[str, bool]:
+    name = raw_name.replace("qwen2_model", "vision_model")
+    is_vision = _is_vision_weight_name(name)
+
+    if name == "lm_head.weight":
+        return "model.lm_head.weight", False
+
+    if name.startswith("model."):
+        if is_vision:
+            while name.startswith("model."):
+                name = name[len("model.") :]
+        else:
+            name = name.replace("model.", "model.model.", 1)
+
+    name = _collapse_model_prefix(name)
+
+    if name.startswith("vision_model.model.") and not name.startswith(
+        "vision_model.model.model."
+    ):
+        name = name.replace("vision_model.model.", "vision_model.model.model.", 1)
+
+    return name, is_vision
 
 
 class DeepseekOCR2ForCausalLM(nn.Module):
@@ -109,7 +154,6 @@ class DeepseekOCR2ForCausalLM(nn.Module):
         self.tile_tag = config.tile_tag
         self.global_view_pos = config.global_view_pos
 
-        # language model
         if self.text_config.topk_method == "noaux_tc":
             self.model = DeepseekV3ForCausalLM(
                 config=self.text_config,
@@ -129,7 +173,6 @@ class DeepseekOCR2ForCausalLM(nn.Module):
                 prefix=maybe_prefix(prefix, "language"),
             )
 
-        # vision modules
         self.sam_model = build_sam_vit_b()
         self.vision_model = build_qwen2_decoder_as_encoder()
         self.projector = MlpProjector(
@@ -179,7 +222,6 @@ class DeepseekOCR2ForCausalLM(nn.Module):
             for jdx in range(images_spatial_crop.size(0)):
                 patches = images_crop[jdx][0].to(torch.bfloat16)
                 image_ori = pixel_values[jdx]
-                crop_shape = images_spatial_crop[jdx][0]
 
                 if torch.sum(patches).item() != 0:
                     local_features = self.vision_model(self.sam_model(patches))
@@ -263,7 +305,7 @@ class DeepseekOCR2ForCausalLM(nn.Module):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None and self.image_token_id is not None:
+        if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings, self.image_token_id
             )
@@ -303,66 +345,67 @@ class DeepseekOCR2ForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
 
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "qwen2_model" in name:
-                name = name.replace("qwen2_model", "vision_model")
-            if name == "lm_head.weight":
-                name = "model.lm_head.weight"
-            elif name.startswith("model."):
-                if any(
-                    key in name
-                    for key in [
-                        "projector",
-                        "vision_model",
-                        "sam_model",
-                        "qwen2_model",
-                        "view_seperator",
-                    ]
-                ):
-                    name = name[len("model.") :]
-                elif not (
-                    ".projector" in name
-                    or "vision_model" in name
-                    or "sam_model" in name
-                ):
-                    name = name.replace("model.", "model.model.")
-            while ".model.model." in name:
-                name = name.replace(".model.model.", ".model.")
-            if (
-                name.startswith("vision_model.model.")
-                and "vision_model.model.model." not in name
-            ):
-                name = name.replace(
-                    "vision_model.model.", "vision_model.model.model.", 1
-                )
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if (
-                    "mlp.experts." in name or "mlp.shared_experts." in name
-                ) and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
+        def _load_param(param_name: str, tensor: torch.Tensor, shard_id=None):
+            param = params_dict[param_name]
+            loader = getattr(param, "weight_loader", default_weight_loader)
+            if shard_id is None:
+                loader(param, tensor)
             else:
-                if name.endswith(".bias") and name not in params_dict:
+                loader(param, tensor, shard_id)
+            loaded_params.add(param_name)
+
+        for raw_name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in raw_name:
+                continue
+
+            name, is_vision = _normalize_weight_name(raw_name)
+
+            if is_vision and "mlp.gate_up_proj" in name:
+                gate_name = name.replace("gate_up_proj", "gate_proj")
+                up_name = name.replace("gate_up_proj", "up_proj")
+                if gate_name in params_dict and up_name in params_dict:
+                    if loaded_weight.dim() < 1 or loaded_weight.shape[0] % 2 != 0:
+                        raise RuntimeError(
+                            f"Unexpected gate_up_proj weight shape: {loaded_weight.shape}"
+                        )
+                    split_size = loaded_weight.shape[0] // 2
+                    _load_param(gate_name, loaded_weight[:split_size])
+                    _load_param(up_name, loaded_weight[split_size:])
                     continue
-                if (
-                    "mlp.experts." in name or "mlp.shared_experts." in name
-                ) and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+
+            if is_vision and "vision_model.model.model.embed_tokens" in name:
+                continue
+
+            if not is_vision:
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if (
+                        "mlp.experts." in name or "mlp.shared_experts." in name
+                    ) and name not in params_dict:
+                        continue
+                    _load_param(name, loaded_weight, shard_id)
+                    break
+                else:
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if (
+                        "mlp.experts." in name or "mlp.shared_experts." in name
+                    ) and name not in params_dict:
+                        continue
+                    if name in params_dict:
+                        _load_param(name, loaded_weight)
+                    else:
+                        raise KeyError(name)
+                continue
+
+            if name in params_dict:
+                _load_param(name, loaded_weight)
+            else:
+                raise KeyError(name)
 
         unloaded_params = params_dict.keys() - loaded_params
         if unloaded_params:
