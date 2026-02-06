@@ -743,11 +743,62 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         else:
             mm_inputs = None
 
+        self._maybe_apply_deepseek_ocr_defaults(obj)
         self._validate_one_request(obj, input_ids)
         trace_slice_end(RequestStage.TOKENIZE, obj.rid)
         return self._create_tokenized_object(
             obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
         )
+
+    def _is_deepseek_ocr_model(self) -> bool:
+        return (
+            getattr(self.model_config.hf_config, "model_type", None) == "deepseek-ocr"
+        )
+
+    def _get_deepseek_ocr_defaults(self):
+        cached = getattr(self, "_deepseek_ocr_defaults", None)
+        if cached is not None:
+            return cached
+        try:
+            from sglang.srt.configs import deepseek_ocr
+        except Exception as exc:
+            logger.warning("Failed to load DeepSeek OCR defaults: %s", exc)
+            return None
+        self._deepseek_ocr_defaults = deepseek_ocr
+        return deepseek_ocr
+
+    def _is_deepseek_ocr_default_processor(self, processor_str: Optional[str]) -> bool:
+        if not processor_str or not self._is_deepseek_ocr_model():
+            return False
+        defaults = self._get_deepseek_ocr_defaults()
+        if defaults is None:
+            return False
+        return processor_str == defaults.DEFAULT_CUSTOM_LOGIT_PROCESSOR
+
+    def _maybe_apply_deepseek_ocr_defaults(
+        self, obj: Union[GenerateReqInput, EmbeddingReqInput]
+    ) -> None:
+        if not isinstance(obj, GenerateReqInput):
+            return
+        if not self._is_deepseek_ocr_model():
+            return
+        defaults = self._get_deepseek_ocr_defaults()
+        if defaults is None:
+            return
+        if obj.sampling_params is None:
+            obj.sampling_params = {}
+        if not isinstance(obj.sampling_params, dict):
+            return
+
+        if obj.custom_logit_processor is None:
+            obj.custom_logit_processor = defaults.DEFAULT_CUSTOM_LOGIT_PROCESSOR
+
+        if obj.custom_logit_processor == defaults.DEFAULT_CUSTOM_LOGIT_PROCESSOR:
+            custom_params = obj.sampling_params.get("custom_params")
+            if custom_params is None or custom_params == {}:
+                obj.sampling_params["custom_params"] = (
+                    defaults.get_default_ngram_custom_params()
+                )
 
     def _validate_one_request(
         self, obj: Union[GenerateReqInput, EmbeddingReqInput], input_ids: List[int]
@@ -826,10 +877,13 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 obj.custom_logit_processor
                 and not self.server_args.enable_custom_logit_processor
             ):
-                raise ValueError(
-                    "The server is not configured to enable custom logit processor. "
-                    "Please set `--enable-custom-logit-processor` to enable this feature."
-                )
+                if not self._is_deepseek_ocr_default_processor(
+                    obj.custom_logit_processor
+                ):
+                    raise ValueError(
+                        "The server is not configured to enable custom logit processor. "
+                        "Please set `--enable-custom-logit-processor` to enable this feature."
+                    )
 
     def _validate_mm_limits(
         self, obj: Union[GenerateReqInput, EmbeddingReqInput]
@@ -995,6 +1049,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         # Process all requests
         tokenized_objs = []
         for i, req in enumerate(requests):
+            self._maybe_apply_deepseek_ocr_defaults(req)
             self._validate_one_request(obj[i], input_ids_list[i])
             token_type_ids = (
                 token_type_ids_list[i] if token_type_ids_list is not None else None

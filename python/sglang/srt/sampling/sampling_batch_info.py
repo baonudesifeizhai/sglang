@@ -112,11 +112,30 @@ class SamplingBatchInfo:
                     for key, value in r.sampling_params.logit_bias.items():
                         logit_bias[i, int(key)] = value
 
+        def _is_deepseek_ocr_default_processor(processor_str: str) -> bool:
+            if (
+                getattr(batch.model_config.hf_config, "model_type", None)
+                != "deepseek-ocr"
+            ):
+                return False
+            from sglang.srt.configs import deepseek_ocr
+
+            return processor_str == deepseek_ocr.DEFAULT_CUSTOM_LOGIT_PROCESSOR
+
         # Check if any request has custom logit processor
-        has_custom_logit_processor = (
-            global_server_args.enable_custom_logit_processor
-            and any(r.custom_logit_processor for r in reqs)  # check the flag first.
-        )  # then check the requests.
+        has_custom_logit_processor = any(
+            r.custom_logit_processor for r in reqs
+        )  # check the requests.
+        if (
+            has_custom_logit_processor
+            and not global_server_args.enable_custom_logit_processor
+        ):
+            # Allow DeepSeek OCR default processor without the global flag.
+            has_custom_logit_processor = all(
+                (r.custom_logit_processor is None)
+                or _is_deepseek_ocr_default_processor(r.custom_logit_processor)
+                for r in reqs
+            )
 
         if has_custom_logit_processor:
             # Merge the same type of custom logit processors together
